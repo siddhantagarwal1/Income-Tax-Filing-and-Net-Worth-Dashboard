@@ -755,6 +755,11 @@ def render_module_3():
           "Miscellaneous Documents",
       ],
   )
+  doc_password = st.text_input(
+      "Document Password (Optional)",
+      type="password",
+      help="Provide password if the file is encrypted",
+  )
 
   if st.button("Upload Document"):
     if uploaded_file is not None:
@@ -770,6 +775,7 @@ def render_module_3():
             "file_name": uploaded_file.name,
             "file_path": file_path,
             "category": category,
+            "file_password": doc_password if doc_password else None,
         }
         supabase.table("document_vault").insert(doc_payload).execute()
         st.success(f"Successfully uploaded {uploaded_file.name}")
@@ -793,7 +799,10 @@ def render_module_3():
 
     if vault_docs:
       doc_df = pd.DataFrame(vault_docs)
-      display_df = doc_df[["file_name", "category", "uploaded_at"]].copy()
+      cols_to_display = ["file_name", "category", "uploaded_at"]
+      if "file_password" in doc_df.columns:
+        cols_to_display.append("file_password")
+      display_df = doc_df[cols_to_display].copy()
       st.dataframe(display_df, use_container_width=True)
 
       st.markdown("#### Delete Document")
@@ -840,6 +849,7 @@ def render_module_3():
               "PAN": client_info.get("pan"),
               "File Name": row.get("file_name"),
               "Category": row.get("category"),
+              "Password Protected": bool(row.get("file_password")),
               "Upload Date": row.get("uploaded_at"),
           })
         df_export = pd.DataFrame(flattened)
