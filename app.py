@@ -176,7 +176,7 @@ def render_module_2():
       f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
   }
   selected_client_label = st.selectbox(
-      "Select Target Client*", list(client_options.keys())
+      "Select Target Client*", list(client_options.keys()), key="m2_client"
   )
   selected_client_id = client_options[selected_client_label]
 
@@ -264,17 +264,171 @@ def render_module_2():
       st.error(f"Failed to generate Excel file: {str(e)}")
 
 
+# --- MODULE 3 RENDER ---
+def render_module_3():
+  st.header("Module 3: Document Vault & Repository")
+
+  try:
+    clients_res = (
+        supabase.table("client_profiles")
+        .select("id, full_legal_name, pan")
+        .execute()
+    )
+    clients = clients_res.data
+  except Exception as e:
+    st.error(f"Failed to fetch client list: {str(e)}")
+    clients = []
+
+  if not clients:
+    st.warning("Please add at least one client profile in Module 1 first.")
+    return
+
+  client_options = {
+      f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
+  }
+  selected_client_label = st.selectbox(
+      "Active Client Selection*", list(client_options.keys()), key="m3_client"
+  )
+  selected_client_id = client_options[selected_client_label]
+
+  st.subheader("Upload Compliance & Financial Documents")
+  uploaded_file = st.file_uploader("Choose a file")
+  category = st.selectbox(
+      "Category Classification*",
+      [
+          "Bank Statements",
+          "AIS/TIS Documents",
+          "Previous Year ITRs",
+          "Sovereign Gold Bond (SGB) Certificates",
+          "Demat Holdings Reports",
+          "Broker Capital Gains Statements",
+          "Form 26AS",
+          "Form 16/16A",
+          "Miscellaneous Documents",
+      ],
+  )
+
+  if st.button("Upload Document"):
+    if uploaded_file is not None:
+      file_path = f"{selected_client_id}/{uploaded_file.name}"
+      try:
+        file_bytes = uploaded_file.read()
+        supabase.storage.from_("vault_documents").upload(
+            file_path, file_bytes, {"upsert": "true"}
+        )
+
+        doc_payload = {
+            "client_id": selected_client_id,
+            "file_name": uploaded_file.name,
+            "file_path": file_path,
+            "category": category,
+        }
+        supabase.table("document_vault").insert(doc_payload).execute()
+        st.success(f"Successfully uploaded {uploaded_file.name}")
+        st.rerun()
+      except Exception as e:
+        st.error(f"Upload failed: {str(e)}")
+    else:
+      st.error("Please select a file to upload.")
+
+  st.markdown("---")
+  st.subheader("Client Vault Repository")
+
+  try:
+    vault_res = (
+        supabase.table("document_vault")
+        .select("*")
+        .eq("client_id", selected_client_id)
+        .execute()
+    )
+    vault_docs = vault_res.data
+
+    if vault_docs:
+      doc_df = pd.DataFrame(vault_docs)
+      display_df = doc_df[["file_name", "category", "uploaded_at"]].copy()
+      st.dataframe(display_df, use_container_width=True)
+
+      st.markdown("#### Delete Document")
+      doc_to_delete = st.selectbox(
+          "Select Document to Delete",
+          options=vault_docs,
+          format_func=lambda x: f"{x['file_name']} ({x['category']})",
+      )
+
+      if st.button("Delete Selected Document"):
+        try:
+          supabase.storage.from_("vault_documents").remove(
+              [doc_to_delete["file_path"]]
+          )
+          supabase.table("document_vault").delete().eq(
+              "id", doc_to_delete["id"]
+          ).execute()
+          st.success(f"Deleted {doc_to_delete['file_name']}")
+          st.rerun()
+        except Exception as e:
+          st.error(f"Delete failed: {str(e)}")
+    else:
+      st.info("No documents found in vault for this client.")
+  except Exception as e:
+    st.error(f"Error fetching vault documents: {str(e)}")
+
+  st.markdown("---")
+  st.subheader("Export Vault Registry")
+
+  if st.button("Fetch & Prepare Vault Registry Excel Export"):
+    try:
+      response = (
+          supabase.table("document_vault")
+          .select("*, client_profiles(full_legal_name, pan)")
+          .execute()
+      )
+      data = response.data
+      if data:
+        flattened = []
+        for row in data:
+          client_info = row.get("client_profiles", {}) or {}
+          flattened.append({
+              "Client Name": client_info.get("full_legal_name"),
+              "PAN": client_info.get("pan"),
+              "File Name": row.get("file_name"),
+              "Category": row.get("category"),
+              "Upload Date": row.get("uploaded_at"),
+          })
+        df_export = pd.DataFrame(flattened)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+          df_export.to_excel(
+              writer, index=False, sheet_name="Vault_Registry"
+          )
+        excel_data = output.getvalue()
+
+        st.download_button(
+            label="📥 Download Module 3 Vault Registry (Excel)",
+            data=excel_data,
+            file_name="Module_3_Vault_Registry.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+      else:
+        st.info("No vault records found to export.")
+    except Exception as e:
+      st.error(f"Failed to generate Excel file: {str(e)}")
+
+
 # --- MAIN NAVIGATION ---
 def main():
   st.title("💼 Income Tax & Wealth Management Suite")
-  tab1, tab2 = st.tabs(
-      ["Module 1: Client Profile", "Module 2: Statutory Questionnaire"]
-  )
+  tab1, tab2, tab3 = st.tabs([
+      "Module 1: Client Profile",
+      "Module 2: Statutory Questionnaire",
+      "Module 3: Document Vault",
+  ])
 
   with tab1:
     render_module_1()
   with tab2:
     render_module_2()
+  with tab3:
+    render_module_3()
 
 
 if __name__ == "__main__":
