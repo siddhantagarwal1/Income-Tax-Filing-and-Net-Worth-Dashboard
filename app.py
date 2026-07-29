@@ -1,6 +1,8 @@
 import io
+import json
 import re
 import pandas as pd
+import pdfplumber
 import streamlit as st
 from supabase import Client, create_client
 
@@ -55,6 +57,50 @@ def determine_itr_form(responses: dict) -> str:
   ):
     return "ITR-2"
   return "ITR-1"
+
+
+# --- MODULE 4 PARSING LOGIC ---
+def parse_vault_document(
+    file_bytes: bytes, file_name: str, category: str
+) -> dict:
+  extracted_records = []
+
+  try:
+    if file_name.endswith(".pdf"):
+      with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        for page_num, page in enumerate(pdf.pages, start=1):
+          text = page.extract_text() or ""
+          tables = page.extract_tables() or []
+
+          page_data = {
+              "page": page_num,
+              "text_snippet": text[:300],
+              "tables": tables,
+          }
+          extracted_records.append(page_data)
+
+    elif file_name.endswith((".xlsx", ".xls", ".csv")):
+      if file_name.endswith(".csv"):
+        df = pd.read_csv(io.BytesIO(file_bytes))
+      else:
+        df = pd.read_excel(io.BytesIO(file_bytes))
+
+      extracted_records = df.head(100).to_dict(orient="records")
+
+    else:
+      extracted_records = [{
+          "info": "Structured parser not available for this file type.",
+          "file_name": file_name,
+      }]
+
+    return {
+        "status": "success",
+        "category": category,
+        "record_count": len(extracted_records),
+        "data": extracted_records,
+    }
+  except Exception as e:
+    return {"status": "error", "error": str(e)}
 
 
 # --- MODULE 1 RENDER ---
@@ -414,13 +460,128 @@ def render_module_3():
       st.error(f"Failed to generate Excel file: {str(e)}")
 
 
+# --- MODULE 4 RENDER ---
+def render_module_4():
+  st.header("Module 4: Automated Document Parsing Engine")
+
+  try:
+    clients_res = (
+        supabase.table("client_profiles")
+        .select("id, full_legal_name, pan")
+        .execute()
+    )
+    clients = clients_res.data
+  except Exception as e:
+    st.error(f"Failed to fetch client list: {str(e)}")
+    clients = []
+
+  if not clients:
+    st.warning("Please add at least one client profile in Module 1 first.")
+    return
+
+  client_options = {
+      f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
+  }
+  selected_client_label = st.selectbox(
+      "Select Active Client*", list(client_options.keys()), key="m4_client"
+  )
+  selected_client_id = client_options[selected_client_label]
+
+  try:
+    vault_res = (
+        supabase.table("document_vault")
+        .select("*")
+        .eq("client_id", selected_client_id)
+        .execute()
+    )
+    vault_docs = vault_res.data
+  except Exception as e:
+    st.error(f"Failed to fetch client documents: {str(e)}")
+    vault_docs = []
+
+  if not vault_docs:
+    st.info("No documents uploaded for this client in Module 3.")
+    return
+
+  st.subheader("Trigger Document Parser")
+  selected_doc = st.selectbox(
+      "Select Document to Parse*",
+      options=vault_docs,
+      format_func=lambda x: f"{x['file_name']} ({x['category']})",
+  )
+
+  if st.button("Run AI Automated Parser"):
+    with st.spinner("Downloading and parsing document line-by-line..."):
+      try:
+        file_bytes = supabase.storage.from_("vault_documents").download(
+            selected_doc["file_path"]
+        )
+
+        parsed_json = parse_vault_document(
+            file_bytes=file_bytes,
+            file_name=selected_doc["file_name"],
+            category=selected_doc["category"],
+        )
+
+        if parsed_json.get("status") == "success":
+          staging_payload = {
+              "client_id": selected_client_id,
+              "vault_file_id": selected_doc["id"],
+              "category": selected_doc["category"],
+              "extracted_json": parsed_json,
+              "status": "Pending Review",
+          }
+
+          supabase.table("parsed_data_staging").insert(
+              staging_payload
+          ).execute()
+          st.success("Document parsed and dispatched to Module 5 Staging Vault!")
+          st.rerun()
+        else:
+          st.error(
+              f"Parsing error: {parsed_json.get('error', 'Unknown error')}"
+          )
+
+      except Exception as e:
+        st.error(f"Failed to parse document: {str(e)}")
+
+  st.markdown("---")
+  st.subheader("Parsed Documents Staging Log")
+
+  try:
+    staging_res = (
+        supabase.table("parsed_data_staging")
+        .select("*, document_vault(file_name)")
+        .eq("client_id", selected_client_id)
+        .execute()
+    )
+    staging_data = staging_res.data
+
+    if staging_data:
+      log_list = []
+      for row in staging_data:
+        doc_info = row.get("document_vault", {}) or {}
+        log_list.append({
+            "File Name": doc_info.get("file_name"),
+            "Category": row.get("category"),
+            "Status": row.get("status"),
+            "Parsed Date": row.get("created_at"),
+        })
+      st.dataframe(pd.DataFrame(log_list), use_container_width=True)
+    else:
+      st.info("No parsed records in staging log for this client.")
+  except Exception as e:
+    st.error(f"Error loading staging log: {str(e)}")
+
+
 # --- MAIN NAVIGATION ---
 def main():
   st.title("💼 Income Tax & Wealth Management Suite")
-  tab1, tab2, tab3 = st.tabs([
+  tab1, tab2, tab3, tab4 = st.tabs([
       "Module 1: Client Profile",
       "Module 2: Statutory Questionnaire",
       "Module 3: Document Vault",
+      "Module 4: Parsing Engine",
   ])
 
   with tab1:
@@ -429,6 +590,8 @@ def main():
     render_module_2()
   with tab3:
     render_module_3()
+  with tab4:
+    render_module_4()
 
 
 if __name__ == "__main__":
