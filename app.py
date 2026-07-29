@@ -1438,10 +1438,195 @@ def render_module_8():
     st.error(f"Error fetching portfolio: {str(e)}")
 
 
+# --- MODULE 9 RENDER ---
+def render_module_9():
+  st.header("Module 9: AIS/TIS Cross-Reconciliation & Discrepancy Engine")
+
+  try:
+    clients_res = (
+        supabase.table("client_profiles")
+        .select("id, full_legal_name, pan")
+        .execute()
+    )
+    clients = clients_res.data
+  except Exception as e:
+    st.error(f"Failed to fetch client list: {str(e)}")
+    clients = []
+
+  if not clients:
+    st.warning("Please add at least one client profile in Module 1 first.")
+    return
+
+  client_options = {
+      f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
+  }
+  selected_client_label = st.selectbox(
+      "Select Active Client*", list(client_options.keys()), key="m9_client"
+  )
+  selected_client_id = client_options[selected_client_label]
+
+  st.subheader("Record AIS / TIS Information & Book Reconciliation Entry")
+  with st.form("ais_tis_reconcile_form"):
+    col1, col2 = st.columns(2)
+    with col1:
+      info_code = st.selectbox(
+          "Information Code / Category*",
+          [
+              "TDS-194J (Professional Fees)",
+              "TDS-194A (Interest Income)",
+              "TDS-194C (Contractor Payments)",
+              "TDS-194IA (Transfer of Immovable Property)",
+              "SFT-005 (Cash Deposit / Withdrawal)",
+              "SFT-012 (Purchase of Shares/MFs)",
+              "MUTUAL_FUND_SALE (MF Redemption)",
+              "DIVIDEND (Dividend Received)",
+              "OFFSHORE_REMITTANCE (LRS u/s 206C)",
+              "OTHER_INFORMATION",
+          ],
+      )
+      source_desc = st.text_input(
+          "Source / Reporter Description*",
+          placeholder="e.g., State Bank of India / Zerodha Broking",
+      )
+      reported_ais = st.number_input(
+          "Reported Amount in AIS (₹)", min_value=0.0, step=1000.0
+      )
+
+    with col2:
+      reported_tis = st.number_input(
+          "Reported Amount in TIS (₹)", min_value=0.0, step=1000.0
+      )
+      books_amount = st.number_input(
+          "Actual Amount as per Books / Bank Ledger (₹)",
+          min_value=0.0,
+          step=1000.0,
+      )
+
+      calc_variance = reported_tis - books_amount
+      st.markdown(f"**Computed Variance (TIS - Books):** ₹{calc_variance:,.2f}")
+
+      discrepancy_status = st.selectbox(
+          "Discrepancy Status*",
+          [
+              "Reconciled - Matched",
+              "Timing Difference",
+              "Information Incorrect in AIS",
+              "Under-Reported in Books",
+              "Duplicate Entry in AIS",
+              "Unreconciled",
+          ],
+      )
+
+    client_remarks = st.text_area(
+        "Client / Consultant Remarks for Portal Feedback"
+    )
+
+    submitted = st.form_submit_button("Save Reconciliation Entry")
+
+    if submitted:
+      if not source_desc:
+        st.error("Source Description is required.")
+      else:
+        payload = {
+            "client_id": selected_client_id,
+            "information_code": info_code.split(" ")[0],
+            "source_description": source_desc,
+            "reported_amount_ais": reported_ais,
+            "reported_amount_tis": reported_tis,
+            "books_amount": books_amount,
+            "discrepancy_status": discrepancy_status,
+            "client_remarks": client_remarks if client_remarks else None,
+        }
+
+        try:
+          supabase.table("ais_tis_reconciliation").insert(payload).execute()
+          st.success("AIS/TIS reconciliation entry saved successfully!")
+          st.rerun()
+        except Exception as e:
+          st.error(f"Database error: {str(e)}")
+
+  st.markdown("---")
+  st.subheader("AIS/TIS Reconciliation Register")
+
+  try:
+    recon_res = (
+        supabase.table("ais_tis_reconciliation")
+        .select("*")
+        .eq("client_id", selected_client_id)
+        .execute()
+    )
+    recon_data = recon_res.data
+
+    if recon_data:
+      r_df = pd.DataFrame(recon_data)
+      display_cols = [
+          "information_code",
+          "source_description",
+          "reported_amount_ais",
+          "reported_amount_tis",
+          "books_amount",
+          "variance",
+          "discrepancy_status",
+          "client_remarks",
+      ]
+      st.dataframe(r_df[display_cols], use_container_width=True)
+    else:
+      st.info("No AIS/TIS reconciliation records found for this client.")
+  except Exception as e:
+    st.error(f"Error fetching reconciliation data: {str(e)}")
+
+  st.markdown("---")
+  st.subheader("Export AIS/TIS Reconciliation Register")
+
+  if st.button("Fetch & Prepare AIS/TIS Excel Export"):
+    try:
+      response = (
+          supabase.table("ais_tis_reconciliation")
+          .select("*, client_profiles(full_legal_name, pan)")
+          .eq("client_id", selected_client_id)
+          .execute()
+      )
+      data = response.data
+      if data:
+        flattened = []
+        for row in data:
+          client_info = row.get("client_profiles", {}) or {}
+          flattened.append({
+              "Client Name": client_info.get("full_legal_name"),
+              "PAN": client_info.get("pan"),
+              "Information Code": row.get("information_code"),
+              "Source Description": row.get("source_description"),
+              "AIS Amount": row.get("reported_amount_ais"),
+              "TIS Amount": row.get("reported_amount_tis"),
+              "Books Amount": row.get("books_amount"),
+              "Variance": row.get("variance"),
+              "Status": row.get("discrepancy_status"),
+              "Remarks": row.get("client_remarks"),
+          })
+        df_export = pd.DataFrame(flattened)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+          df_export.to_excel(
+              writer, index=False, sheet_name="AIS_TIS_Reconciliation"
+          )
+        excel_data = output.getvalue()
+
+        st.download_button(
+            label="📥 Download Module 9 AIS/TIS Register (Excel)",
+            data=excel_data,
+            file_name="Module_9_AIS_TIS_Reconciliation.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+      else:
+        st.info("No AIS/TIS reconciliation records found to export.")
+    except Exception as e:
+      st.error(f"Failed to generate Excel file: {str(e)}")
+
+
 # --- MAIN NAVIGATION ---
 def main():
   st.title("💼 Income Tax & Wealth Management Suite")
-  tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+  tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
       "Module 1: Client Profile",
       "Module 2: Statutory Questionnaire",
       "Module 3: Document Vault",
@@ -1450,6 +1635,7 @@ def main():
       "Module 6: Bank Ledger",
       "Module 7: Capital Gains",
       "Module 8: SGB & Debt Portfolio",
+      "Module 9: AIS/TIS Reconciliation",
   ])
 
   with tab1:
@@ -1468,6 +1654,8 @@ def main():
     render_module_7()
   with tab8:
     render_module_8()
+  with tab9:
+    render_module_9()
 
 
 if __name__ == "__main__":
