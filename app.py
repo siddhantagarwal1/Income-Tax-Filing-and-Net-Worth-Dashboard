@@ -347,6 +347,102 @@ def compute_total_tax_liability(
   }
 
 
+# --- MODULE 13 COMPUTATION LOGIC ---
+def compute_advance_tax_schedule(
+    net_tax_liability: float,
+    projected_tds: float,
+    is_senior_citizen: bool,
+    has_pgbp: bool,
+    is_presumptive: bool,
+    q1_paid: float,
+    q2_paid: float,
+    q3_paid: float,
+    q4_paid: float,
+) -> dict:
+  net_advance_tax = max(0.0, net_tax_liability - projected_tds)
+
+  # Senior Citizen Exemption u/s 207
+  if is_senior_citizen and not has_pgbp:
+    return {
+        "is_exempt": True,
+        "net_due": 0.0,
+        "q1_due": 0.0,
+        "q2_due": 0.0,
+        "q3_due": 0.0,
+        "q4_due": 0.0,
+        "interest_234c": 0.0,
+        "interest_234b": 0.0,
+    }
+
+  if net_advance_tax < 10000.0:
+    return {
+        "is_exempt": True,
+        "net_due": net_advance_tax,
+        "q1_due": 0.0,
+        "q2_due": 0.0,
+        "q3_due": 0.0,
+        "q4_due": 0.0,
+        "interest_234c": 0.0,
+        "interest_234b": 0.0,
+    }
+
+  if is_presumptive:
+    q1_due = 0.0
+    q2_due = 0.0
+    q3_due = 0.0
+    q4_due = net_advance_tax
+  else:
+    q1_due = net_advance_tax * 0.15
+    q2_due = net_advance_tax * 0.45
+    q3_due = net_advance_tax * 0.75
+    q4_due = net_advance_tax * 1.00
+
+  # Interest u/s 234C
+  int_234c = 0.0
+  if not is_presumptive:
+    # Q1: 12% threshold tolerance
+    cum_q1 = q1_paid
+    if cum_q1 < (net_advance_tax * 0.12):
+      int_234c += (net_advance_tax * 0.15 - cum_q1) * 0.03
+
+    # Q2: 36% threshold tolerance
+    cum_q2 = cum_q1 + q2_paid
+    if cum_q2 < (net_advance_tax * 0.36):
+      int_234c += (net_advance_tax * 0.45 - cum_q2) * 0.03
+
+    # Q3: 75%
+    cum_q3 = cum_q2 + q3_paid
+    if cum_q3 < (net_advance_tax * 0.75):
+      int_234c += (net_advance_tax * 0.75 - cum_q3) * 0.03
+
+    # Q4: 100%
+    cum_q4 = cum_q3 + q4_paid
+    if cum_q4 < net_advance_tax:
+      int_234c += (net_advance_tax - cum_q4) * 0.01
+  else:
+    cum_q4 = q1_paid + q2_paid + q3_paid + q4_paid
+    if cum_q4 < net_advance_tax:
+      int_234c += (net_advance_tax - cum_q4) * 0.01
+
+  # Interest u/s 234B (Shortfall of 90% at end of FY)
+  int_234b = 0.0
+  total_paid = q1_paid + q2_paid + q3_paid + q4_paid
+  if total_paid < (net_advance_tax * 0.90):
+    shortfall = net_advance_tax - total_paid
+    int_234b = shortfall * 0.01  # Computed per month upon assessment
+
+  return {
+      "is_exempt": False,
+      "net_due": net_advance_tax,
+      "q1_due": round(q1_due, 2),
+      "q2_due": round(q2_due, 2),
+      "q3_due": round(q3_due, 2),
+      "q4_due": round(q4_due, 2),
+      "interest_234c": round(int_234c, 2),
+      "interest_234b": round(int_234b, 2),
+  }
+
+
 # --- MODULE 1 RENDER ---
 def render_module_1():
   st.header("Module 1: Basic Profile Details")
@@ -2382,6 +2478,154 @@ def render_module_12():
       st.error(f"Error fetching Schedule TR data: {str(e)}")
 
 
+# --- MODULE 13 RENDER ---
+def render_module_13():
+  st.header("Module 13: Advance Tax Computation & Due Date Tracker Engine")
+
+  try:
+    clients_res = (
+        supabase.table("client_profiles")
+        .select("id, full_legal_name, pan")
+        .execute()
+    )
+    clients = clients_res.data
+  except Exception as e:
+    st.error(f"Failed to fetch client list: {str(e)}")
+    clients = []
+
+  if not clients:
+    st.warning("Please add at least one client profile in Module 1 first.")
+    return
+
+  client_options = {
+      f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
+  }
+  selected_client_label = st.selectbox(
+      "Select Active Client*", list(client_options.keys()), key="m13_client"
+  )
+  selected_client_id = client_options[selected_client_label]
+
+  st.subheader("Compute Advance Tax Liability & Quarterly Installments")
+  with st.form("advance_tax_form"):
+    col1, col2 = st.columns(2)
+    with col1:
+      ay = st.selectbox("Assessment Year*", ["2026-27", "2025-26"])
+      est_net_tax = st.number_input(
+          "Estimated Total Tax Liability (₹)*", min_value=0.0, step=5000.0
+      )
+      proj_tds = st.number_input(
+          "Projected TDS / TCS Credit (₹)", min_value=0.0, step=1000.0
+      )
+      is_senior = st.checkbox("Resident Senior Citizen (Age 60 or above)")
+      has_pgbp_inc = st.checkbox(
+          "Has Income from Business/Profession (PGBP)", value=True
+      )
+      is_presumptive_tax = st.checkbox(
+          "Opted for Presumptive Taxation (Sec 44AD / 44ADA)"
+      )
+
+    with col2:
+      st.markdown("#### Quarterly Advance Tax Paid (₹)")
+      q1_paid_amt = st.number_input("Q1 Paid (by June 15)", step=1000.0)
+      q1_date = st.date_input("Q1 Payment Date", value=None)
+
+      q2_paid_amt = st.number_input("Q2 Paid (by Sept 15)", step=1000.0)
+      q2_date = st.date_input("Q2 Payment Date", value=None)
+
+      q3_paid_amt = st.number_input("Q3 Paid (by Dec 15)", step=1000.0)
+      q3_date = st.date_input("Q3 Payment Date", value=None)
+
+      q4_paid_amt = st.number_input("Q4 Paid (by March 15)", step=1000.0)
+      q4_date = st.date_input("Q4 Payment Date", value=None)
+
+    sub_adv = st.form_submit_button("Run Advance Tax Engine")
+
+    if sub_adv:
+      adv_res = compute_advance_tax_schedule(
+          net_tax_liability=est_net_tax,
+          projected_tds=proj_tds,
+          is_senior_citizen=is_senior,
+          has_pgbp=has_pgbp_inc,
+          is_presumptive=is_presumptive_tax,
+          q1_paid=q1_paid_amt,
+          q2_paid=q2_paid_amt,
+          q3_paid=q3_paid_amt,
+          q4_paid=q4_paid_amt,
+      )
+
+      payload = {
+          "client_id": selected_client_id,
+          "assessment_year": ay,
+          "estimated_net_tax_liability": est_net_tax,
+          "projected_tds_tcs_credit": proj_tds,
+          "assessed_net_advance_tax_due": adv_res["net_due"],
+          "is_senior_citizen_exempt": is_senior and not has_pgbp_inc,
+          "is_presumptive_scheme": is_presumptive_tax,
+          "q1_due_amount": adv_res["q1_due"],
+          "q1_paid_amount": q1_paid_amt,
+          "q1_payment_date": str(q1_date) if q1_date else None,
+          "q2_due_amount": adv_res["q2_due"],
+          "q2_paid_amount": q2_paid_amt,
+          "q2_payment_date": str(q2_date) if q2_date else None,
+          "q3_due_amount": adv_res["q3_due"],
+          "q3_paid_amount": q3_paid_amt,
+          "q3_payment_date": str(q3_date) if q3_date else None,
+          "q4_due_amount": adv_res["q4_due"],
+          "q4_paid_amount": q4_paid_amt,
+          "q4_payment_date": str(q4_date) if q4_date else None,
+          "interest_u_s_234c": adv_res["interest_234c"],
+          "interest_u_s_234b": adv_res["interest_234b"],
+      }
+
+      try:
+        supabase.table("advance_tax_schedules").upsert(
+            payload, on_conflict="client_id, assessment_year"
+        ).execute()
+        st.success("Advance Tax Schedule successfully computed and saved!")
+
+        if adv_res["is_exempt"]:
+          st.info(
+              "ℹ️ Exempt from Advance Tax u/s 207 / Liability below ₹10,000"
+              " threshold."
+          )
+        else:
+          st.markdown("### 📅 Advance Tax Quarterly Schedule & Statutory Interest")
+          c1, c2, c3, c4 = st.columns(4)
+          c1.metric("Q1 Due (15% by Jun 15)", f"₹{adv_res['q1_due']:,.2f}")
+          c2.metric("Q2 Due (45% by Sep 15)", f"₹{adv_res['q2_due']:,.2f}")
+          c3.metric("Q3 Due (75% by Dec 15)", f"₹{adv_res['q3_due']:,.2f}")
+          c4.metric("Q4 Due (100% by Mar 15)", f"₹{adv_res['q4_due']:,.2f}")
+
+          i1, i2 = st.columns(2)
+          i1.metric(
+              "Interest u/s 234C (Deferment)",
+              f"₹{adv_res['interest_234c']:,.2f}",
+          )
+          i2.metric(
+              "Interest u/s 234B (Default)", f"₹{adv_res['interest_234b']:,.2f}"
+          )
+
+        st.rerun()
+      except Exception as e:
+        st.error(f"Database error: {str(e)}")
+
+  st.markdown("---")
+  st.subheader("Saved Advance Tax Schedule Log")
+  try:
+    adv_log = (
+        supabase.table("advance_tax_schedules")
+        .select("*")
+        .eq("client_id", selected_client_id)
+        .execute()
+    )
+    if adv_log.data:
+      st.dataframe(pd.DataFrame(adv_log.data), use_container_width=True)
+    else:
+      st.info("No advance tax records found for this client.")
+  except Exception as e:
+    st.error(f"Error loading advance tax schedules: {str(e)}")
+
+
 # --- MAIN NAVIGATION ---
 def main():
   st.title("💼 Income Tax & Wealth Management Suite")
@@ -2398,6 +2642,7 @@ def main():
       tab10,
       tab11,
       tab12,
+      tab13,
   ) = st.tabs([
       "Module 1: Profile",
       "Module 2: Questionnaire",
@@ -2411,6 +2656,7 @@ def main():
       "Module 10: Tax Computation",
       "Module 11: Schedule AL",
       "Module 12: Schedule FA & TR",
+      "Module 13: Advance Tax Tracker",
   ])
 
   with tab1:
@@ -2437,6 +2683,8 @@ def main():
     render_module_11()
   with tab12:
     render_module_12()
+  with tab13:
+    render_module_13()
 
 
 if __name__ == "__main__":
