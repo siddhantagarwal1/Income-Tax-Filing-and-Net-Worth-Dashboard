@@ -378,7 +378,7 @@ def render_module_1():
           ],
       )
       assessment_year = st.selectbox(
-          "Assessment Year (AY)*", ["2025-26", "2024-25", "2026-27"]
+          "Assessment Year (AY)*", ["2026-27", "2025-26", "2024-25"]
       )
 
     submitted = st.form_submit_button("Save Profile Details")
@@ -1793,7 +1793,7 @@ def render_module_10():
 
       payload = {
           "client_id": selected_client_id,
-          "assessment_year": "2025-26",
+          "assessment_year": "2026-27",
           "income_salary": inc_salary,
           "income_house_property": inc_house_prop,
           "income_pgbp": inc_pgbp,
@@ -1960,10 +1960,9 @@ def render_module_11():
   selected_client_id = client_options[selected_client_label]
 
   financial_year = st.selectbox(
-      "Financial Year (FY)*", ["2024-25", "2023-24", "2025-26"]
+      "Financial Year (FY)*", ["2025-26", "2024-25", "2023-24"]
   )
 
-  # Check Schedule AL Applicability based on Module 10 GTI
   try:
     tax_comp_res = (
         supabase.table("tax_computations")
@@ -2192,6 +2191,197 @@ def render_module_11():
       st.error(f"Failed to generate Excel file: {str(e)}")
 
 
+# --- MODULE 12 RENDER ---
+def render_module_12():
+  st.header(
+      "Module 12: Foreign Assets (Schedule FA) & Foreign Tax Credit (Schedule"
+      " TR / Form 67)"
+  )
+
+  try:
+    clients_res = (
+        supabase.table("client_profiles")
+        .select("id, full_legal_name, pan")
+        .execute()
+    )
+    clients = clients_res.data
+  except Exception as e:
+    st.error(f"Failed to fetch client list: {str(e)}")
+    clients = []
+
+  if not clients:
+    st.warning("Please add at least one client profile in Module 1 first.")
+    return
+
+  client_options = {
+      f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
+  }
+  selected_client_label = st.selectbox(
+      "Select Active Client*", list(client_options.keys()), key="m12_client"
+  )
+  selected_client_id = client_options[selected_client_label]
+
+  st.error(
+      "⚠️ **Statutory Risk Alert u/s 43 of Black Money Act, 2015:** Non-disclosure"
+      " or inaccurate reporting of foreign assets in Schedule FA attracts a"
+      " mandatory penalty of ₹10,000,00 per year."
+  )
+
+  tab_fa, tab_tr = st.tabs(
+      ["1. Schedule FA (Foreign Assets)", "2. Schedule TR & Form 67 (FTC)"]
+  )
+
+  with tab_fa:
+    st.subheader("Record Foreign Asset / Account Holding")
+    with st.form("schedule_fa_form"):
+      col1, col2 = st.columns(2)
+      with col1:
+        calendar_year = st.text_input("Calendar Year (CY)*", value="2025")
+        country_code = st.text_input("Country Code (e.g., USA, GBR, SGP)*")
+        country_name = st.text_input("Country Name*")
+        asset_category = st.selectbox(
+            "Asset Category*",
+            [
+                "Foreign Depository Account",
+                "Foreign Custodial Account",
+                "Foreign Equity & Debt Interest (ESOPs/RSUs)",
+                "Financial Interest in Foreign Entity",
+                "Foreign Immovable Property",
+                "Other Foreign Assets / Accounts",
+            ],
+        )
+        institution_name = st.text_input(
+            "Institution / Entity / Property Name*"
+        )
+        account_tin = st.text_input("Account Number / Foreign TIN*")
+
+      with col2:
+        peak_balance = st.number_input(
+            "Peak Balance during CY (₹)*", min_value=0.0, step=10000.0
+        )
+        closing_balance = st.number_input(
+            "Closing Balance as on Dec 31 (₹)*", min_value=0.0, step=10000.0
+        )
+        gross_income = st.number_input(
+            "Gross Income Derived in CY (₹)", min_value=0.0, step=5000.0
+        )
+        gross_sales = st.number_input(
+            "Gross Sale Proceeds Realized in CY (₹)",
+            min_value=0.0,
+            step=10000.0,
+        )
+
+      sub_fa = st.form_submit_button("Save Foreign Asset Record")
+
+      if sub_fa:
+        if not country_code or not institution_name or not account_tin:
+          st.error("Please fill in mandatory foreign asset fields.")
+        else:
+          payload = {
+              "client_id": selected_client_id,
+              "calendar_year": calendar_year,
+              "country_code": country_code.upper(),
+              "country_name": country_name,
+              "asset_category": asset_category,
+              "institution_or_entity_name": institution_name,
+              "account_number_or_tin": account_tin,
+              "peak_balance_during_cy": peak_balance,
+              "closing_balance_as_on_dec_31": closing_balance,
+              "gross_income_derived_in_cy": gross_income,
+              "gross_sale_proceeds_realized_in_cy": gross_sales,
+          }
+          try:
+            supabase.table("schedule_fa_foreign_assets").insert(
+                payload
+            ).execute()
+            st.success("Foreign asset entry saved to Schedule FA!")
+            st.rerun()
+          except Exception as e:
+            st.error(f"Database error: {str(e)}")
+
+    st.markdown("---")
+    st.subheader("Foreign Assets Register (Schedule FA)")
+    try:
+      fa_res = (
+          supabase.table("schedule_fa_foreign_assets")
+          .select("*")
+          .eq("client_id", selected_client_id)
+          .execute()
+      )
+      if fa_res.data:
+        st.dataframe(pd.DataFrame(fa_res.data), use_container_width=True)
+      else:
+        st.info("No foreign assets recorded for this client.")
+    except Exception as e:
+      st.error(f"Error fetching Schedule FA data: {str(e)}")
+
+  with tab_tr:
+    st.subheader("Record Foreign Tax Credit (FTC) & Form 67")
+    with st.form("schedule_tr_form"):
+      col3, col4 = st.columns(2)
+      with col3:
+        ay_tr = st.selectbox(
+            "Assessment Year*", ["2026-27", "2025-26", "2024-25"]
+        )
+        country_code_tr = st.text_input("Foreign Country Code*")
+        foreign_tax_id = st.text_input("Foreign Tax ID (TIN)")
+        foreign_income = st.number_input(
+            "Foreign Income Taxable in India (₹)*", min_value=0.0, step=10000.0
+        )
+
+      with col4:
+        tax_paid_outside = st.number_input(
+            "Tax Paid Outside India (₹)*", min_value=0.0, step=5000.0
+        )
+        claimed_ftc = st.number_input(
+            "Claimed Foreign Tax Credit u/s 90/91 (₹)*",
+            min_value=0.0,
+            step=5000.0,
+        )
+        form_67_date = st.date_input("Form 67 Filing Date")
+        form_67_ack = st.text_input("Form 67 Acknowledgement Number")
+
+      sub_tr = st.form_submit_button("Save Tax Credit (Schedule TR)")
+
+      if sub_tr:
+        if not country_code_tr:
+          st.error("Country Code is required.")
+        else:
+          payload = {
+              "client_id": selected_client_id,
+              "assessment_year": ay_tr,
+              "country_code": country_code_tr.upper(),
+              "foreign_tax_id": foreign_tax_id,
+              "foreign_income_taxable_in_india": foreign_income,
+              "tax_paid_outside_india": tax_paid_outside,
+              "claimed_ftc_sec_90_91": claimed_ftc,
+              "form_67_filed_date": str(form_67_date) if form_67_date else None,
+              "form_67_acknowledgement_number": form_67_ack,
+          }
+          try:
+            supabase.table("schedule_tr_tax_credits").insert(payload).execute()
+            st.success("Foreign Tax Credit entry saved!")
+            st.rerun()
+          except Exception as e:
+            st.error(f"Database error: {str(e)}")
+
+    st.markdown("---")
+    st.subheader("Foreign Tax Credits Register (Schedule TR)")
+    try:
+      tr_res = (
+          supabase.table("schedule_tr_tax_credits")
+          .select("*")
+          .eq("client_id", selected_client_id)
+          .execute()
+      )
+      if tr_res.data:
+        st.dataframe(pd.DataFrame(tr_res.data), use_container_width=True)
+      else:
+        st.info("No foreign tax credits recorded for this client.")
+    except Exception as e:
+      st.error(f"Error fetching Schedule TR data: {str(e)}")
+
+
 # --- MAIN NAVIGATION ---
 def main():
   st.title("💼 Income Tax & Wealth Management Suite")
@@ -2207,18 +2397,20 @@ def main():
       tab9,
       tab10,
       tab11,
+      tab12,
   ) = st.tabs([
-      "Module 1: Client Profile",
-      "Module 2: Statutory Questionnaire",
-      "Module 3: Document Vault",
-      "Module 4: Parsing Engine",
-      "Module 5: Validation & Mapping",
+      "Module 1: Profile",
+      "Module 2: Questionnaire",
+      "Module 3: Vault",
+      "Module 4: Parser",
+      "Module 5: Validation",
       "Module 6: Bank Ledger",
       "Module 7: Capital Gains",
-      "Module 8: SGB & Debt Portfolio",
-      "Module 9: AIS/TIS Reconciliation",
+      "Module 8: SGB & Debt",
+      "Module 9: AIS/TIS Reconcile",
       "Module 10: Tax Computation",
-      "Module 11: Net Worth (Schedule AL)",
+      "Module 11: Schedule AL",
+      "Module 12: Schedule FA & TR",
   ])
 
   with tab1:
@@ -2243,6 +2435,8 @@ def main():
     render_module_10()
   with tab11:
     render_module_11()
+  with tab12:
+    render_module_12()
 
 
 if __name__ == "__main__":
