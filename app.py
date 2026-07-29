@@ -574,14 +574,166 @@ def render_module_4():
     st.error(f"Error loading staging log: {str(e)}")
 
 
+# --- MODULE 5 RENDER ---
+def render_module_5():
+  st.header("Module 5: Parsed Data Validation & Template Mapping Vault")
+
+  try:
+    clients_res = (
+        supabase.table("client_profiles")
+        .select("id, full_legal_name, pan")
+        .execute()
+    )
+    clients = clients_res.data
+  except Exception as e:
+    st.error(f"Failed to fetch client list: {str(e)}")
+    clients = []
+
+  if not clients:
+    st.warning("Please add at least one client profile in Module 1 first.")
+    return
+
+  client_options = {
+      f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
+  }
+  selected_client_label = st.selectbox(
+      "Select Active Client*", list(client_options.keys()), key="m5_client"
+  )
+  selected_client_id = client_options[selected_client_label]
+
+  try:
+    staging_res = (
+        supabase.table("parsed_data_staging")
+        .select("*, document_vault(file_name)")
+        .eq("client_id", selected_client_id)
+        .execute()
+    )
+    staging_records = staging_res.data
+  except Exception as e:
+    st.error(f"Failed to fetch staging data: {str(e)}")
+    staging_records = []
+
+  if not staging_records:
+    st.info("No parsed records awaiting validation for this client.")
+    return
+
+  selected_staging = st.selectbox(
+      "Select Staged Document for Mapping & Review*",
+      options=staging_records,
+      format_func=lambda x: (
+          f"{x.get('document_vault', {}).get('file_name', 'Unknown File')}"
+          f" ({x['category']})"
+      ),
+  )
+
+  st.subheader("Template Mapping & Validation Controls")
+  with st.form("template_mapping_form"):
+    template_type = st.selectbox(
+        "Assign Ledger Template*",
+        [
+            "Bank Statement Ledger",
+            "AIS/TIS Data Schedule",
+            "Capital Gains Broker Ledger",
+            "SGB Portfolio Ledger",
+            "Form 16 Tax Schedule",
+            "Form 26AS TDS Register",
+            "Generic Document Ledger",
+        ],
+    )
+
+    template_approved = st.checkbox(
+        "Confirm Template Mapping", value=False
+    )
+    data_accuracy_approved = st.checkbox(
+        "Verify Extracted Data Accuracy", value=False
+    )
+
+    st.markdown("#### Parsed Data Preview")
+    extracted_json = selected_staging.get("extracted_json", {})
+    st.json(extracted_json)
+
+    submitted = st.form_submit_button("Save Mapping & Validation Sign-Off")
+
+    if submitted:
+      payload = {
+          "client_id": selected_client_id,
+          "vault_file_id": selected_staging["vault_file_id"],
+          "template_type": template_type,
+          "template_approved": template_approved,
+          "extracted_data": extracted_json,
+          "data_accuracy_approved": data_accuracy_approved,
+      }
+
+      try:
+        supabase.table("parsed_template_mappings").insert(payload).execute()
+
+        new_status = (
+            "Approved"
+            if (template_approved and data_accuracy_approved)
+            else "Pending Review"
+        )
+        supabase.table("parsed_data_staging").update(
+            {"status": new_status}
+        ).eq("id", selected_staging["id"]).execute()
+
+        st.success("Validation and template mapping saved successfully!")
+        st.rerun()
+      except Exception as e:
+        st.error(f"Failed to save mapping: {str(e)}")
+
+  st.markdown("---")
+  st.subheader("Export Validated Mappings")
+
+  if st.button("Fetch & Prepare Mappings Excel Export"):
+    try:
+      response = (
+          supabase.table("parsed_template_mappings")
+          .select("*, client_profiles(full_legal_name, pan)")
+          .eq("client_id", selected_client_id)
+          .execute()
+      )
+      data = response.data
+      if data:
+        flattened = []
+        for row in data:
+          client_info = row.get("client_profiles", {}) or {}
+          flattened.append({
+              "Client Name": client_info.get("full_legal_name"),
+              "PAN": client_info.get("pan"),
+              "Template Type": row.get("template_type"),
+              "Template Approved": row.get("template_approved"),
+              "Data Accuracy Verified": row.get("data_accuracy_approved"),
+              "Created At": row.get("created_at"),
+          })
+        df_export = pd.DataFrame(flattened)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+          df_export.to_excel(
+              writer, index=False, sheet_name="Validated_Mappings"
+          )
+        excel_data = output.getvalue()
+
+        st.download_button(
+            label="📥 Download Module 5 Validated Mappings (Excel)",
+            data=excel_data,
+            file_name="Module_5_Validated_Mappings.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+      else:
+        st.info("No validated mapping records found to export.")
+    except Exception as e:
+      st.error(f"Failed to generate Excel file: {str(e)}")
+
+
 # --- MAIN NAVIGATION ---
 def main():
   st.title("💼 Income Tax & Wealth Management Suite")
-  tab1, tab2, tab3, tab4 = st.tabs([
+  tab1, tab2, tab3, tab4, tab5 = st.tabs([
       "Module 1: Client Profile",
       "Module 2: Statutory Questionnaire",
       "Module 3: Document Vault",
       "Module 4: Parsing Engine",
+      "Module 5: Validation & Mapping",
   ])
 
   with tab1:
@@ -592,6 +744,8 @@ def main():
     render_module_3()
   with tab4:
     render_module_4()
+  with tab5:
+    render_module_5()
 
 
 if __name__ == "__main__":
