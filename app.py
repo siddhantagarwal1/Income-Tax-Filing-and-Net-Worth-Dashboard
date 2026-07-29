@@ -103,6 +103,33 @@ def parse_vault_document(
     return {"status": "error", "error": str(e)}
 
 
+# --- MODULE 6 CATEGORIZATION ENGINE ---
+def auto_categorize_transaction(description: str) -> tuple:
+  desc_upper = description.upper()
+
+  if any(
+      k in desc_upper for k in ["TAX", "CHALLAN", "ADVANCE TAX", "INCOME TAX"]
+  ):
+    return "Tax Payment (Advance/Self-Assessment)", "Sec 211 / Sec 140A"
+
+  if any(k in desc_upper for k in ["DIVIDEND", "DIV ", "INTEREST", "INT PAID"]):
+    return "Dividend / Interest Income", "Sec 56 (IFOS)"
+
+  if any(
+      k in desc_upper
+      for k in ["MUTUAL FUND", "ZERODHA", "GROWW", "SIP", "EQUITY", "PURCHASE"]
+  ):
+    return "Investment / Capital Outflow", "Capital Asset / Sec 45"
+
+  if any(
+      k in desc_upper
+      for k in ["SELF", "TRANSFER TO", "TRANSFER FROM", "SWEEP", "CONTRA"]
+  ):
+    return "Contra / Internal Transfer", "N/A (Excluded)"
+
+  return "Uncategorized", "Review Needed"
+
+
 # --- MODULE 1 RENDER ---
 def render_module_1():
   st.header("Module 1: Basic Profile Details")
@@ -725,15 +752,191 @@ def render_module_5():
       st.error(f"Failed to generate Excel file: {str(e)}")
 
 
+# --- MODULE 6 RENDER ---
+def render_module_6():
+  st.header("Module 6: Standardized Bank Ledger & Categorization Engine")
+
+  try:
+    clients_res = (
+        supabase.table("client_profiles")
+        .select("id, full_legal_name, pan")
+        .execute()
+    )
+    clients = clients_res.data
+  except Exception as e:
+    st.error(f"Failed to fetch client list: {str(e)}")
+    clients = []
+
+  if not clients:
+    st.warning("Please add at least one client profile in Module 1 first.")
+    return
+
+  client_options = {
+      f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
+  }
+  selected_client_label = st.selectbox(
+      "Select Active Client*", list(client_options.keys()), key="m6_client"
+  )
+  selected_client_id = client_options[selected_client_label]
+
+  st.subheader("Manual Transaction Entry & Categorization")
+  with st.form("manual_txn_form"):
+    col1, col2 = st.columns(2)
+    with col1:
+      txn_date = st.date_input("Transaction Date*")
+      description = st.text_input("Transaction Narrative / Description*")
+      debit_amount = st.number_input(
+          "Debit Amount (₹)", min_value=0.0, step=100.0
+      )
+
+    with col2:
+      credit_amount = st.number_input(
+          "Credit Amount (₹)", min_value=0.0, step=100.0
+      )
+      balance = st.number_input("Running Balance (₹)", step=100.0)
+
+      auto_cat, auto_sec = auto_categorize_transaction(description)
+      category = st.selectbox(
+          "Category*",
+          [
+              "Business Receipt",
+              "Business Expense",
+              "Personal Expense",
+              "Tax Payment (Advance/Self-Assessment)",
+              "Investment / Capital Outflow",
+              "Dividend / Interest Income",
+              "Contra / Internal Transfer",
+              "Uncategorized",
+          ],
+          index=[
+              "Business Receipt",
+              "Business Expense",
+              "Personal Expense",
+              "Tax Payment (Advance/Self-Assessment)",
+              "Investment / Capital Outflow",
+              "Dividend / Interest Income",
+              "Contra / Internal Transfer",
+              "Uncategorized",
+          ].index(auto_cat),
+      )
+
+    it_act_section = st.text_input(
+        "Income Tax Act Provision / Section", value=auto_sec
+    )
+    is_verified = st.checkbox("Mark Entry as Verified", value=True)
+
+    submitted = st.form_submit_button("Save Transaction to Ledger")
+
+    if submitted:
+      if not description:
+        st.error("Transaction description is required.")
+      else:
+        payload = {
+            "client_id": selected_client_id,
+            "txn_date": str(txn_date),
+            "description": description,
+            "debit_amount": debit_amount,
+            "credit_amount": credit_amount,
+            "balance": balance,
+            "category": category,
+            "it_act_section": it_act_section,
+            "is_verified": is_verified,
+        }
+
+        try:
+          supabase.table("bank_ledger_transactions").insert(payload).execute()
+          st.success("Transaction successfully added to bank ledger!")
+          st.rerun()
+        except Exception as e:
+          st.error(f"Database error: {str(e)}")
+
+  st.markdown("---")
+  st.subheader("Bank Ledger Transactions Register")
+
+  try:
+    ledger_res = (
+        supabase.table("bank_ledger_transactions")
+        .select("*")
+        .eq("client_id", selected_client_id)
+        .order("txn_date", desc=True)
+        .execute()
+    )
+    ledger_data = ledger_res.data
+
+    if ledger_data:
+      ledger_df = pd.DataFrame(ledger_data)
+      display_cols = [
+          "txn_date",
+          "description",
+          "debit_amount",
+          "credit_amount",
+          "balance",
+          "category",
+          "it_act_section",
+          "is_verified",
+      ]
+      st.dataframe(ledger_df[display_cols], use_container_width=True)
+    else:
+      st.info("No transaction records found in ledger for this client.")
+  except Exception as e:
+    st.error(f"Error fetching ledger: {str(e)}")
+
+  st.markdown("---")
+  st.subheader("Export Bank Ledger")
+
+  if st.button("Fetch & Prepare Bank Ledger Excel Export"):
+    try:
+      response = (
+          supabase.table("bank_ledger_transactions")
+          .select("*, client_profiles(full_legal_name, pan)")
+          .eq("client_id", selected_client_id)
+          .execute()
+      )
+      data = response.data
+      if data:
+        flattened = []
+        for row in data:
+          client_info = row.get("client_profiles", {}) or {}
+          flattened.append({
+              "Client Name": client_info.get("full_legal_name"),
+              "PAN": client_info.get("pan"),
+              "Date": row.get("txn_date"),
+              "Description": row.get("description"),
+              "Debit": row.get("debit_amount"),
+              "Credit": row.get("credit_amount"),
+              "Balance": row.get("balance"),
+              "Category": row.get("category"),
+              "IT Provision": row.get("it_act_section"),
+              "Verified": row.get("is_verified"),
+          })
+        df_export = pd.DataFrame(flattened)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+          df_export.to_excel(writer, index=False, sheet_name="Bank_Ledger")
+        excel_data = output.getvalue()
+
+        st.download_button(
+            label="📥 Download Module 6 Bank Ledger (Excel)",
+            data=excel_data,
+            file_name="Module_6_Bank_Ledger.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+      else:
+        st.info("No bank ledger records found to export.")
+    except Exception as e:
+      st.error(f"Failed to generate Excel file: {str(e)}")
+
+
 # --- MAIN NAVIGATION ---
 def main():
   st.title("💼 Income Tax & Wealth Management Suite")
-  tab1, tab2, tab3, tab4, tab5 = st.tabs([
+  tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
       "Module 1: Client Profile",
       "Module 2: Statutory Questionnaire",
       "Module 3: Document Vault",
       "Module 4: Parsing Engine",
       "Module 5: Validation & Mapping",
+      "Module 6: Bank Ledger",
   ])
 
   with tab1:
@@ -746,6 +949,8 @@ def main():
     render_module_4()
   with tab5:
     render_module_5()
+  with tab6:
+    render_module_6()
 
 
 if __name__ == "__main__":
