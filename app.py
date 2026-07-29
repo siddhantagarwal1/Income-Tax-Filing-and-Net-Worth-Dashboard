@@ -285,13 +285,11 @@ def compute_total_tax_liability(
     ifos: float,
     chapter_via: float,
 ) -> dict:
-  # Old Regime Computation
   std_deduction_old = 50000.0 if salary > 0 else 0.0
   net_salary_old = max(0.0, salary - std_deduction_old)
   gti_old = net_salary_old + house_prop + pgbp + stcg + ltcg + ifos
   nti_old = max(0.0, gti_old - chapter_via)
 
-  # Tax calculation - Old Regime Slabs
   tax_old = 0.0
   taxable_slab_old = max(0.0, nti_old - (stcg + ltcg))
 
@@ -302,25 +300,21 @@ def compute_total_tax_liability(
   elif taxable_slab_old > 250000:
     tax_old += (taxable_slab_old - 250000) * 0.05
 
-  # Rebate u/s 87A (Old)
   if taxable_slab_old <= 500000:
     rebate_old = min(tax_old, 12500.0)
     tax_old -= rebate_old
 
-  # Capital Gains special rates (STCG u/s 111A @ 20%, LTCG u/s 112A/112 @ 12.5%)
   tax_old += (stcg * 0.20) + max(0.0, (ltcg - 125000) * 0.125)
   total_tax_old = tax_old * 1.04
 
-  # New Regime Computation (u/s 115BAC)
   std_deduction_new = 75000.0 if salary > 0 else 0.0
   net_salary_new = max(0.0, salary - std_deduction_new)
   gti_new = net_salary_new + house_prop + pgbp + stcg + ltcg + ifos
-  nti_new = gti_new  # No Chapter VI-A deductions except 80CCD(2)
+  nti_new = gti_new
 
   tax_new = 0.0
   taxable_slab_new = max(0.0, nti_new - (stcg + ltcg))
 
-  # Slabs AY 2025-26 / AY 2026-27 (Finance Act 2024)
   if taxable_slab_new > 1500000:
     tax_new += (taxable_slab_new - 1500000) * 0.30 + 140000
   elif taxable_slab_new > 1200000:
@@ -332,7 +326,6 @@ def compute_total_tax_liability(
   elif taxable_slab_new > 300000:
     tax_new += (taxable_slab_new - 300000) * 0.05
 
-  # Rebate u/s 87A (New)
   if taxable_slab_new <= 700000:
     rebate_new = min(tax_new, 25000.0)
     tax_new -= rebate_new
@@ -1937,10 +1930,284 @@ def render_module_10():
       st.error(f"Failed to generate Excel file: {str(e)}")
 
 
+# --- MODULE 11 RENDER ---
+def render_module_11():
+  st.header(
+      "Module 11: Comprehensive Wealth & Net Worth Statement (Schedule AL)"
+  )
+
+  try:
+    clients_res = (
+        supabase.table("client_profiles")
+        .select("id, full_legal_name, pan")
+        .execute()
+    )
+    clients = clients_res.data
+  except Exception as e:
+    st.error(f"Failed to fetch client list: {str(e)}")
+    clients = []
+
+  if not clients:
+    st.warning("Please add at least one client profile in Module 1 first.")
+    return
+
+  client_options = {
+      f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
+  }
+  selected_client_label = st.selectbox(
+      "Select Active Client*", list(client_options.keys()), key="m11_client"
+  )
+  selected_client_id = client_options[selected_client_label]
+
+  financial_year = st.selectbox(
+      "Financial Year (FY)*", ["2024-25", "2023-24", "2025-26"]
+  )
+
+  # Check Schedule AL Applicability based on Module 10 GTI
+  try:
+    tax_comp_res = (
+        supabase.table("tax_computations")
+        .select("gross_total_income")
+        .eq("client_id", selected_client_id)
+        .execute()
+    )
+    if tax_comp_res.data:
+      gti = tax_comp_res.data[0].get("gross_total_income", 0.0)
+      if gti > 5000000:
+        st.warning(
+            f"⚠️ Schedule AL Mandated u/s 139: Total Income (₹{gti:,.2f}) exceeds"
+            " ₹50 Lakhs threshold."
+        )
+      else:
+        st.info(
+            f"ℹ️ Total Income is ₹{gti:,.2f} (Below ₹50 Lakhs threshold)."
+            " Schedule AL is Optional."
+        )
+  except Exception:
+    pass
+
+  tab_asset, tab_liab = st.tabs(
+      ["1. Asset Register", "2. Liabilities Register"]
+  )
+
+  with tab_asset:
+    st.subheader("Record Wealth Asset Holding")
+    with st.form("wealth_asset_form"):
+      col1, col2 = st.columns(2)
+      with col1:
+        asset_category = st.selectbox(
+            "Asset Category*",
+            [
+                "Immovable Property (Land / Building)",
+                "Movable - Financial (Shares / Debentures / MFs)",
+                "Movable - SGB & Bullion / Jewelry",
+                "Movable - Vehicles / Aircraft / Yachts",
+                "Movable - Cash & Bank Balances",
+                "Movable - Insurance Policies",
+                "Other Assets",
+            ],
+        )
+        asset_description = st.text_input("Asset Description / Address*")
+      with col2:
+        cost_acq = st.number_input(
+            "Cost of Acquisition / Value as per Books (₹)*",
+            min_value=0.0,
+            step=50000.0,
+        )
+        est_market_val = st.number_input(
+            "Estimated Market Value (₹)", min_value=0.0, step=50000.0
+        )
+
+      sub_asset = st.form_submit_button("Save Asset Record")
+
+      if sub_asset:
+        if not asset_description:
+          st.error("Asset Description is required.")
+        else:
+          payload = {
+              "client_id": selected_client_id,
+              "financial_year": financial_year,
+              "asset_category": asset_category,
+              "asset_description": asset_description,
+              "cost_of_acquisition": cost_acq,
+              "estimated_market_value": est_market_val,
+          }
+          try:
+            supabase.table("wealth_net_worth_assets").insert(payload).execute()
+            st.success("Asset successfully recorded!")
+            st.rerun()
+          except Exception as e:
+            st.error(f"Database error: {str(e)}")
+
+  with tab_liab:
+    st.subheader("Record Liability / Loan Balance")
+    with st.form("wealth_liability_form"):
+      col3, col4 = st.columns(2)
+      with col3:
+        liability_category = st.selectbox(
+            "Liability Category*",
+            [
+                "Housing Loan / Mortgage",
+                "Vehicle Loan",
+                "Secured Business / Portfolio Loan",
+                "Unsecured Loan / Personal Loan",
+                "Bank Overdraft",
+                "Other Liabilities",
+            ],
+        )
+        lender_name = st.text_input("Lender Name / Financial Institution*")
+      with col4:
+        outstanding_amount = st.number_input(
+            "Outstanding Amount as on March 31 (₹)*",
+            min_value=0.0,
+            step=50000.0,
+        )
+
+      sub_liab = st.form_submit_button("Save Liability Record")
+
+      if sub_liab:
+        if not lender_name:
+          st.error("Lender Name is required.")
+        else:
+          payload = {
+              "client_id": selected_client_id,
+              "financial_year": financial_year,
+              "liability_category": liability_category,
+              "lender_name": lender_name,
+              "outstanding_amount": outstanding_amount,
+          }
+          try:
+            supabase.table("wealth_net_worth_liabilities").insert(
+                payload
+            ).execute()
+            st.success("Liability successfully recorded!")
+            st.rerun()
+          except Exception as e:
+            st.error(f"Database error: {str(e)}")
+
+  st.markdown("---")
+  st.subheader("📊 Net Worth Summary Dashboard")
+
+  try:
+    assets_res = (
+        supabase.table("wealth_net_worth_assets")
+        .select("*")
+        .eq("client_id", selected_client_id)
+        .eq("financial_year", financial_year)
+        .execute()
+    )
+    liab_res = (
+        supabase.table("wealth_net_worth_liabilities")
+        .select("*")
+        .eq("client_id", selected_client_id)
+        .eq("financial_year", financial_year)
+        .execute()
+    )
+
+    assets_data = assets_res.data or []
+    liab_data = liab_res.data or []
+
+    total_assets_cost = sum(
+        a.get("cost_of_acquisition", 0.0) for a in assets_data
+    )
+    total_assets_market = sum(
+        a.get("estimated_market_value", 0.0) for a in assets_data
+    )
+    total_liabilities = sum(
+        l.get("outstanding_amount", 0.0) for l in liab_data
+    )
+
+    net_worth_cost = total_assets_cost - total_liabilities
+    net_worth_market = total_assets_market - total_liabilities
+
+    n1, n2, n3, n4 = st.columns(4)
+    n1.metric("Total Assets (Book Value)", f"₹{total_assets_cost:,.2f}")
+    n2.metric("Total Assets (Market Value)", f"₹{total_assets_market:,.2f}")
+    n3.metric("Total Liabilities", f"₹{total_liabilities:,.2f}")
+    n4.metric("Net Worth (Market Value)", f"₹{net_worth_market:,.2f}")
+
+    if assets_data:
+      st.markdown("#### Asset Portfolio Schedule")
+      st.dataframe(pd.DataFrame(assets_data)[
+          [
+              "asset_category",
+              "asset_description",
+              "cost_of_acquisition",
+              "estimated_market_value",
+          ]
+      ], use_container_width=True)
+
+    if liab_data:
+      st.markdown("#### Liabilities Schedule")
+      st.dataframe(pd.DataFrame(liab_data)[
+          [
+              "liability_category",
+              "lender_name",
+              "outstanding_amount",
+          ]
+      ], use_container_width=True)
+
+  except Exception as e:
+    st.error(f"Error fetching Net Worth statement: {str(e)}")
+
+  st.markdown("---")
+  st.subheader("Export Net Worth Statement")
+
+  if st.button("Fetch & Prepare Net Worth Excel Export"):
+    try:
+      assets_exp = (
+          supabase.table("wealth_net_worth_assets")
+          .select("*, client_profiles(full_legal_name, pan)")
+          .eq("client_id", selected_client_id)
+          .eq("financial_year", financial_year)
+          .execute()
+      )
+      liab_exp = (
+          supabase.table("wealth_net_worth_liabilities")
+          .select("*, client_profiles(full_legal_name, pan)")
+          .eq("client_id", selected_client_id)
+          .eq("financial_year", financial_year)
+          .execute()
+      )
+
+      output = io.BytesIO()
+      with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        if assets_exp.data:
+          pd.DataFrame(assets_exp.data).to_excel(
+              writer, index=False, sheet_name="Schedule_AL_Assets"
+          )
+        if liab_exp.data:
+          pd.DataFrame(liab_exp.data).to_excel(
+              writer, index=False, sheet_name="Schedule_AL_Liabilities"
+          )
+
+      excel_data = output.getvalue()
+      st.download_button(
+          label="📥 Download Module 11 Net Worth Statement (Excel)",
+          data=excel_data,
+          file_name=f"Module_11_Net_Worth_Statement_{financial_year}.xlsx",
+          mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      )
+    except Exception as e:
+      st.error(f"Failed to generate Excel file: {str(e)}")
+
+
 # --- MAIN NAVIGATION ---
 def main():
   st.title("💼 Income Tax & Wealth Management Suite")
-  tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
+  (
+      tab1,
+      tab2,
+      tab3,
+      tab4,
+      tab5,
+      tab6,
+      tab7,
+      tab8,
+      tab9,
+      tab10,
+      tab11,
+  ) = st.tabs([
       "Module 1: Client Profile",
       "Module 2: Statutory Questionnaire",
       "Module 3: Document Vault",
@@ -1951,6 +2218,7 @@ def main():
       "Module 8: SGB & Debt Portfolio",
       "Module 9: AIS/TIS Reconciliation",
       "Module 10: Tax Computation",
+      "Module 11: Net Worth (Schedule AL)",
   ])
 
   with tab1:
@@ -1973,6 +2241,8 @@ def main():
     render_module_9()
   with tab10:
     render_module_10()
+  with tab11:
+    render_module_11()
 
 
 if __name__ == "__main__":
