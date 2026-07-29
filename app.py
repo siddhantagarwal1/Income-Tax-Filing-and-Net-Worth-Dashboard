@@ -275,6 +275,85 @@ def compute_sgb_debt_taxation(
   }
 
 
+# --- MODULE 10 COMPUTATION ENGINE ---
+def compute_total_tax_liability(
+    salary: float,
+    house_prop: float,
+    pgbp: float,
+    stcg: float,
+    ltcg: float,
+    ifos: float,
+    chapter_via: float,
+) -> dict:
+  # Old Regime Computation
+  std_deduction_old = 50000.0 if salary > 0 else 0.0
+  net_salary_old = max(0.0, salary - std_deduction_old)
+  gti_old = net_salary_old + house_prop + pgbp + stcg + ltcg + ifos
+  nti_old = max(0.0, gti_old - chapter_via)
+
+  # Tax calculation - Old Regime Slabs
+  tax_old = 0.0
+  taxable_slab_old = max(0.0, nti_old - (stcg + ltcg))
+
+  if taxable_slab_old > 1000000:
+    tax_old += (taxable_slab_old - 1000000) * 0.30 + 112500
+  elif taxable_slab_old > 500000:
+    tax_old += (taxable_slab_old - 500000) * 0.20 + 12500
+  elif taxable_slab_old > 250000:
+    tax_old += (taxable_slab_old - 250000) * 0.05
+
+  # Rebate u/s 87A (Old)
+  if taxable_slab_old <= 500000:
+    rebate_old = min(tax_old, 12500.0)
+    tax_old -= rebate_old
+
+  # Capital Gains special rates (STCG u/s 111A @ 20%, LTCG u/s 112A/112 @ 12.5%)
+  tax_old += (stcg * 0.20) + max(0.0, (ltcg - 125000) * 0.125)
+  total_tax_old = tax_old * 1.04
+
+  # New Regime Computation (u/s 115BAC)
+  std_deduction_new = 75000.0 if salary > 0 else 0.0
+  net_salary_new = max(0.0, salary - std_deduction_new)
+  gti_new = net_salary_new + house_prop + pgbp + stcg + ltcg + ifos
+  nti_new = gti_new  # No Chapter VI-A deductions except 80CCD(2)
+
+  tax_new = 0.0
+  taxable_slab_new = max(0.0, nti_new - (stcg + ltcg))
+
+  # Slabs AY 2025-26 / AY 2026-27 (Finance Act 2024)
+  if taxable_slab_new > 1500000:
+    tax_new += (taxable_slab_new - 1500000) * 0.30 + 140000
+  elif taxable_slab_new > 1200000:
+    tax_new += (taxable_slab_new - 1200000) * 0.20 + 80000
+  elif taxable_slab_new > 1000000:
+    tax_new += (taxable_slab_new - 1000000) * 0.15 + 50000
+  elif taxable_slab_new > 700000:
+    tax_new += (taxable_slab_new - 700000) * 0.10 + 20000
+  elif taxable_slab_new > 300000:
+    tax_new += (taxable_slab_new - 300000) * 0.05
+
+  # Rebate u/s 87A (New)
+  if taxable_slab_new <= 700000:
+    rebate_new = min(tax_new, 25000.0)
+    tax_new -= rebate_new
+
+  tax_new += (stcg * 0.20) + max(0.0, (ltcg - 125000) * 0.125)
+  total_tax_new = tax_new * 1.04
+
+  recommended = (
+      "New Regime" if total_tax_new <= total_tax_old else "Old Regime"
+  )
+
+  return {
+      "gti": gti_new,
+      "nti_old": nti_old,
+      "nti_new": nti_new,
+      "tax_old_regime": round(total_tax_old, 2),
+      "tax_new_regime": round(total_tax_new, 2),
+      "recommended_regime": recommended,
+  }
+
+
 # --- MODULE 1 RENDER ---
 def render_module_1():
   st.header("Module 1: Basic Profile Details")
@@ -1623,10 +1702,245 @@ def render_module_9():
       st.error(f"Failed to generate Excel file: {str(e)}")
 
 
+# --- MODULE 10 RENDER ---
+def render_module_10():
+  st.header(
+      "Module 10: Five Heads of Income & Final Tax Computation Dashboard"
+  )
+
+  try:
+    clients_res = (
+        supabase.table("client_profiles")
+        .select("id, full_legal_name, pan")
+        .execute()
+    )
+    clients = clients_res.data
+  except Exception as e:
+    st.error(f"Failed to fetch client list: {str(e)}")
+    clients = []
+
+  if not clients:
+    st.warning("Please add at least one client profile in Module 1 first.")
+    return
+
+  client_options = {
+      f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
+  }
+  selected_client_label = st.selectbox(
+      "Select Active Client*", list(client_options.keys()), key="m10_client"
+  )
+  selected_client_id = client_options[selected_client_label]
+
+  st.subheader("Compute Head-wise Income & Tax Liability")
+  with st.form("tax_computation_form"):
+    st.markdown("### 1. Five Heads of Income (₹)")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+      inc_salary = st.number_input(
+          "Gross Salary Income (Sec 15-17)", min_value=0.0, step=5000.0
+      )
+      inc_house_prop = st.number_input(
+          "Income / Loss from House Property (Sec 22-27)", step=5000.0
+      )
+    with col2:
+      inc_pgbp = st.number_input(
+          "Profits & Gains of Business / Profession (PGBP)", step=5000.0
+      )
+      inc_stcg = st.number_input("Short Term Capital Gains (STCG)", step=5000.0)
+    with col3:
+      inc_ltcg = st.number_input("Long Term Capital Gains (LTCG)", step=5000.0)
+      inc_ifos = st.number_input(
+          "Income from Other Sources (IFOS - Interest/Dividend)", step=5000.0
+      )
+
+    st.markdown("### 2. Deductions & Tax Credits (₹)")
+    col4, col5 = st.columns(2)
+    with col4:
+      chapter_via_deductions = st.number_input(
+          "Chapter VI-A Deductions (80C, 80D, 80CCD, etc. - Old Regime)",
+          min_value=0.0,
+          step=5000.0,
+      )
+      tds_tcs_credit = st.number_input(
+          "TDS / TCS Prepaid Tax Credit", min_value=0.0, step=1000.0
+      )
+    with col5:
+      advance_tax = st.number_input(
+          "Advance Tax Paid u/s 211", min_value=0.0, step=1000.0
+      )
+      self_assessment_tax = st.number_input(
+          "Self Assessment Tax Paid u/s 140A", min_value=0.0, step=1000.0
+      )
+      interest_234 = st.number_input(
+          "Interest u/s 234A / 234B / 234C", min_value=0.0, step=500.0
+      )
+
+    submitted = st.form_submit_button("Run Tax Computation Engine")
+
+    if submitted:
+      tax_calc = compute_total_tax_liability(
+          salary=inc_salary,
+          house_prop=inc_house_prop,
+          pgbp=inc_pgbp,
+          stcg=inc_stcg,
+          ltcg=inc_ltcg,
+          ifos=inc_ifos,
+          chapter_via=chapter_via_deductions,
+      )
+
+      chosen_tax = (
+          tax_calc["tax_new_regime"]
+          if tax_calc["recommended_regime"] == "New Regime"
+          else tax_calc["tax_old_regime"]
+      )
+      total_prepaid = tds_tcs_credit + advance_tax + self_assessment_tax
+      net_payable_refundable = (
+          (chosen_tax + interest_234) - total_prepaid
+      )
+
+      payload = {
+          "client_id": selected_client_id,
+          "assessment_year": "2025-26",
+          "income_salary": inc_salary,
+          "income_house_property": inc_house_prop,
+          "income_pgbp": inc_pgbp,
+          "income_capital_gains_stcg": inc_stcg,
+          "income_capital_gains_ltcg": inc_ltcg,
+          "income_ifos": inc_ifos,
+          "gross_total_income": tax_calc["gti"],
+          "deductions_chapter_via": chapter_via_deductions,
+          "net_taxable_income": (
+              tax_calc["nti_new"]
+              if tax_calc["recommended_regime"] == "New Regime"
+              else tax_calc["nti_old"]
+          ),
+          "tax_liability_old_regime": tax_calc["tax_old_regime"],
+          "tax_liability_new_regime": tax_calc["tax_new_regime"],
+          "recommended_tax_regime": tax_calc["recommended_regime"],
+          "tds_tcs_credit": tds_tcs_credit,
+          "advance_tax_paid": advance_tax,
+          "self_assessment_tax_paid": self_assessment_tax,
+          "interest_u_s_234a_b_c": interest_234,
+          "net_tax_payable_or_refundable": net_payable_refundable,
+      }
+
+      try:
+        supabase.table("tax_computations").upsert(
+            payload, on_conflict="client_id, assessment_year"
+        ).execute()
+        st.success("Tax computation generated & saved successfully!")
+
+        st.markdown("---")
+        st.markdown("### 📊 Tax Analysis Summary")
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Gross Total Income", f"₹{tax_calc['gti']:,.2f}")
+        m2.metric("Old Regime Tax", f"₹{tax_calc['tax_old_regime']:,.2f}")
+        m3.metric("New Regime Tax", f"₹{tax_calc['tax_new_regime']:,.2f}")
+        m4.metric("Optimal Regime", tax_calc["recommended_regime"])
+
+        if net_payable_refundable > 0:
+          st.warning(
+              f"⚠️ Balance Net Tax Payable: ₹{net_payable_refundable:,.2f}"
+          )
+        elif net_payable_refundable < 0:
+          st.success(
+              f"🎉 Refund Due to Client: ₹{abs(net_payable_refundable):,.2f}"
+          )
+        else:
+          st.info("✅ Net Tax Position: Fully Settled / Zero Balance")
+
+        st.rerun()
+      except Exception as e:
+        st.error(f"Database error: {str(e)}")
+
+  st.markdown("---")
+  st.subheader("Saved Tax Computation Summary")
+
+  try:
+    tax_res = (
+        supabase.table("tax_computations")
+        .select("*")
+        .eq("client_id", selected_client_id)
+        .execute()
+    )
+    tax_data = tax_res.data
+
+    if tax_data:
+      t_df = pd.DataFrame(tax_data)
+      display_cols = [
+          "assessment_year",
+          "gross_total_income",
+          "tax_liability_old_regime",
+          "tax_liability_new_regime",
+          "recommended_tax_regime",
+          "net_tax_payable_or_refundable",
+      ]
+      st.dataframe(t_df[display_cols], use_container_width=True)
+    else:
+      st.info("No tax computations found for this client.")
+  except Exception as e:
+    st.error(f"Error fetching computation records: {str(e)}")
+
+  st.markdown("---")
+  st.subheader("Export Final Tax Computation")
+
+  if st.button("Fetch & Prepare Final Computation Excel Export"):
+    try:
+      response = (
+          supabase.table("tax_computations")
+          .select("*, client_profiles(full_legal_name, pan)")
+          .eq("client_id", selected_client_id)
+          .execute()
+      )
+      data = response.data
+      if data:
+        flattened = []
+        for row in data:
+          client_info = row.get("client_profiles", {}) or {}
+          flattened.append({
+              "Client Name": client_info.get("full_legal_name"),
+              "PAN": client_info.get("pan"),
+              "AY": row.get("assessment_year"),
+              "Salary": row.get("income_salary"),
+              "House Property": row.get("income_house_property"),
+              "PGBP": row.get("income_pgbp"),
+              "STCG": row.get("income_capital_gains_stcg"),
+              "LTCG": row.get("income_capital_gains_ltcg"),
+              "IFOS": row.get("income_ifos"),
+              "GTI": row.get("gross_total_income"),
+              "Chapter VI-A": row.get("deductions_chapter_via"),
+              "Old Regime Tax": row.get("tax_liability_old_regime"),
+              "New Regime Tax": row.get("tax_liability_new_regime"),
+              "Optimal Regime": row.get("recommended_tax_regime"),
+              "Net Tax Payable/Refundable": row.get(
+                  "net_tax_payable_or_refundable"
+              ),
+          })
+        df_export = pd.DataFrame(flattened)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+          df_export.to_excel(
+              writer, index=False, sheet_name="Tax_Computation"
+          )
+        excel_data = output.getvalue()
+
+        st.download_button(
+            label="📥 Download Module 10 Tax Computation (Excel)",
+            data=excel_data,
+            file_name="Module_10_Tax_Computation.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+      else:
+        st.info("No computation records found to export.")
+    except Exception as e:
+      st.error(f"Failed to generate Excel file: {str(e)}")
+
+
 # --- MAIN NAVIGATION ---
 def main():
   st.title("💼 Income Tax & Wealth Management Suite")
-  tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+  tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
       "Module 1: Client Profile",
       "Module 2: Statutory Questionnaire",
       "Module 3: Document Vault",
@@ -1636,6 +1950,7 @@ def main():
       "Module 7: Capital Gains",
       "Module 8: SGB & Debt Portfolio",
       "Module 9: AIS/TIS Reconciliation",
+      "Module 10: Tax Computation",
   ])
 
   with tab1:
@@ -1656,6 +1971,8 @@ def main():
     render_module_8()
   with tab9:
     render_module_9()
+  with tab10:
+    render_module_10()
 
 
 if __name__ == "__main__":
