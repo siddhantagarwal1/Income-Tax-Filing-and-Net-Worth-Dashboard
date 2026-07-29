@@ -361,7 +361,6 @@ def compute_advance_tax_schedule(
 ) -> dict:
   net_advance_tax = max(0.0, net_tax_liability - projected_tds)
 
-  # Senior Citizen Exemption u/s 207
   if is_senior_citizen and not has_pgbp:
     return {
         "is_exempt": True,
@@ -397,25 +396,20 @@ def compute_advance_tax_schedule(
     q3_due = net_advance_tax * 0.75
     q4_due = net_advance_tax * 1.00
 
-  # Interest u/s 234C
   int_234c = 0.0
   if not is_presumptive:
-    # Q1: 12% threshold tolerance
     cum_q1 = q1_paid
     if cum_q1 < (net_advance_tax * 0.12):
       int_234c += (net_advance_tax * 0.15 - cum_q1) * 0.03
 
-    # Q2: 36% threshold tolerance
     cum_q2 = cum_q1 + q2_paid
     if cum_q2 < (net_advance_tax * 0.36):
       int_234c += (net_advance_tax * 0.45 - cum_q2) * 0.03
 
-    # Q3: 75%
     cum_q3 = cum_q2 + q3_paid
     if cum_q3 < (net_advance_tax * 0.75):
       int_234c += (net_advance_tax * 0.75 - cum_q3) * 0.03
 
-    # Q4: 100%
     cum_q4 = cum_q3 + q4_paid
     if cum_q4 < net_advance_tax:
       int_234c += (net_advance_tax - cum_q4) * 0.01
@@ -424,12 +418,11 @@ def compute_advance_tax_schedule(
     if cum_q4 < net_advance_tax:
       int_234c += (net_advance_tax - cum_q4) * 0.01
 
-  # Interest u/s 234B (Shortfall of 90% at end of FY)
   int_234b = 0.0
   total_paid = q1_paid + q2_paid + q3_paid + q4_paid
   if total_paid < (net_advance_tax * 0.90):
     shortfall = net_advance_tax - total_paid
-    int_234b = shortfall * 0.01  # Computed per month upon assessment
+    int_234b = shortfall * 0.01
 
   return {
       "is_exempt": False,
@@ -440,6 +433,75 @@ def compute_advance_tax_schedule(
       "q4_due": round(q4_due, 2),
       "interest_234c": round(int_234c, 2),
       "interest_234b": round(int_234b, 2),
+  }
+
+
+# --- MODULE 14 COMPUTATION LOGIC ---
+def compute_presumptive_taxation(
+    section_code: str,
+    gross_digital: float,
+    gross_cash: float,
+    heavy_vehicles: int,
+    other_vehicles: int,
+    holding_months: int,
+    declared_income: float,
+) -> dict:
+  computed_min_income = 0.0
+  is_audit_required = False
+  audit_reason = "Compliant u/s 44AB"
+
+  total_turnover = gross_digital + gross_cash
+
+  if section_code == "44AD":
+    cash_percentage = (
+        (gross_cash / total_turnover) * 100 if total_turnover > 0 else 0.0
+    )
+    max_turnover = 30000000.0 if cash_percentage <= 5.0 else 20000000.0
+
+    if total_turnover > max_turnover:
+      is_audit_required = True
+      audit_reason = f"Turnover ₹{total_turnover:,.2f} exceeds threshold limit u/s 44AD."
+    else:
+      computed_min_income = (gross_digital * 0.06) + (gross_cash * 0.08)
+      if declared_income < computed_min_income:
+        is_audit_required = True
+        audit_reason = "Declared income below statutory presumptive rate (6%/8%) u/s 44AD."
+
+  elif section_code == "44ADA":
+    cash_percentage = (
+        (gross_cash / total_turnover) * 100 if total_turnover > 0 else 0.0
+    )
+    max_turnover = 7500000.0 if cash_percentage <= 5.0 else 5000000.0
+
+    if total_turnover > max_turnover:
+      is_audit_required = True
+      audit_reason = f"Gross receipts ₹{total_turnover:,.2f} exceed threshold u/s 44ADA."
+    else:
+      computed_min_income = total_turnover * 0.50
+      if declared_income < computed_min_income:
+        is_audit_required = True
+        audit_reason = (
+            "Declared income below 50% statutory presumptive rate u/s 44ADA."
+        )
+
+  elif section_code == "44AE":
+    total_vehicles = heavy_vehicles + other_vehicles
+    if total_vehicles > 10:
+      is_audit_required = True
+      audit_reason = "Vehicle count exceeds maximum threshold of 10 for Sec 44AE."
+    else:
+      heavy_min = heavy_vehicles * 1000 * 1000 * holding_months  # Rs 1000 per ton per month
+      other_min = other_vehicles * 7500 * holding_months
+      computed_min_income = heavy_min + other_min
+      if declared_income < computed_min_income:
+        is_audit_required = True
+        audit_reason = "Declared income below statutory minimum amount u/s 44AE."
+
+  return {
+      "total_turnover": total_turnover,
+      "computed_min_income": round(computed_min_income, 2),
+      "is_audit_required": is_audit_required,
+      "audit_reason": audit_reason,
   }
 
 
@@ -2626,6 +2688,177 @@ def render_module_13():
     st.error(f"Error loading advance tax schedules: {str(e)}")
 
 
+# --- MODULE 14 RENDER ---
+def render_module_14():
+  st.header(
+      "Module 14: Presumptive Taxation Engine (Sec 44AD, Sec 44ADA & Sec 44AE)"
+  )
+
+  try:
+    clients_res = (
+        supabase.table("client_profiles")
+        .select("id, full_legal_name, pan")
+        .execute()
+    )
+    clients = clients_res.data
+  except Exception as e:
+    st.error(f"Failed to fetch client list: {str(e)}")
+    clients = []
+
+  if not clients:
+    st.warning("Please add at least one client profile in Module 1 first.")
+    return
+
+  client_options = {
+      f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
+  }
+  selected_client_label = st.selectbox(
+      "Select Active Client*", list(client_options.keys()), key="m14_client"
+  )
+  selected_client_id = client_options[selected_client_label]
+
+  st.subheader("Presumptive Scheme Declaration & Audit Evaluation")
+  with st.form("presumptive_taxation_form"):
+    col1, col2 = st.columns(2)
+    with col1:
+      ay_pres = st.selectbox(
+          "Assessment Year*", ["2026-27", "2025-26"], key="m14_ay"
+      )
+      section_code = st.selectbox(
+          "Presumptive Section Provision*",
+          ["44AD (Small Business)", "44ADA (Professionals)", "44AE (Transporters)"],
+      )
+      sec_type = section_code.split(" ")[0]
+
+      gross_digital = 0.0
+      gross_cash = 0.0
+      heavy_vehicles = 0
+      other_vehicles = 0
+      holding_months = 0
+
+      if sec_type in ["44AD", "44ADA"]:
+        gross_digital = st.number_input(
+            "Gross Turnover / Receipts via Account Payee/Digital Modes (₹)",
+            min_value=0.0,
+            step=50000.0,
+        )
+        gross_cash = st.number_input(
+            "Gross Turnover / Receipts via Cash/Other Modes (₹)",
+            min_value=0.0,
+            step=50000.0,
+        )
+      elif sec_type == "44AE":
+        heavy_vehicles = st.number_input(
+            "Heavy Goods Vehicles Owned (Tonnage > 12 MT)",
+            min_value=0,
+            max_value=10,
+            step=1,
+        )
+        other_vehicles = st.number_input(
+            "Other Goods Vehicles Owned", min_value=0, max_value=10, step=1
+        )
+        holding_months = st.number_input(
+            "Total Vehicle Ownership Months in FY",
+            min_value=1,
+            max_value=12,
+            value=12,
+        )
+
+    with col2:
+      declared_income = st.number_input(
+          "Actual Net Profit / Income Declared for Return (₹)*",
+          min_value=0.0,
+          step=10000.0,
+      )
+
+    sub_pres = st.form_submit_button("Evaluate Presumptive Income & Audit Risk")
+
+    if sub_pres:
+      eval_res = compute_presumptive_taxation(
+          section_code=sec_type,
+          gross_digital=gross_digital,
+          gross_cash=gross_cash,
+          heavy_vehicles=heavy_vehicles,
+          other_vehicles=other_vehicles,
+          holding_months=holding_months,
+          declared_income=declared_income,
+      )
+
+      payload = {
+          "client_id": selected_client_id,
+          "assessment_year": ay_pres,
+          "section_code": sec_type,
+          "gross_turnover_digital": gross_digital,
+          "gross_turnover_cash": gross_cash,
+          "presumptive_rate_applied": (
+              50.0
+              if sec_type == "44ADA"
+              else (
+                  (
+                      (eval_res["computed_min_income"] / eval_res["total_turnover"])
+                      * 100
+                  )
+                  if eval_res["total_turnover"] > 0
+                  else 0.0
+              )
+          ),
+          "computed_presumptive_income": eval_res["computed_min_income"],
+          "heavy_goods_vehicle_count": heavy_vehicles,
+          "other_goods_vehicle_count": other_vehicles,
+          "vehicle_holding_months": holding_months,
+          "declared_income": declared_income,
+          "is_tax_audit_required": eval_res["is_audit_required"],
+          "audit_reason": eval_res["audit_reason"],
+      }
+
+      try:
+        supabase.table("presumptive_taxation_records").upsert(
+            payload, on_conflict="client_id, assessment_year, section_code"
+        ).execute()
+        st.success("Presumptive taxation record saved!")
+
+        st.markdown("---")
+        st.markdown("### 📊 Statutory Compliance & Audit Summary")
+        m1, m2 = st.columns(2)
+        m1.metric(
+            "Minimum Presumptive Income u/s statutory rate",
+            f"₹{eval_res['computed_min_income']:,.2f}",
+        )
+        m2.metric(
+            "Tax Audit Status u/s 44AB",
+            (
+                "REQUIRED"
+                if eval_res["is_audit_required"]
+                else "NOT REQUIRED (Compliant)"
+            ),
+        )
+
+        if eval_res["is_audit_required"]:
+          st.error(f"⚠️ Mandatory Tax Audit Triggered: {eval_res['audit_reason']}")
+        else:
+          st.success("✅ Declared income satisfies statutory thresholds.")
+
+        st.rerun()
+      except Exception as e:
+        st.error(f"Database error: {str(e)}")
+
+  st.markdown("---")
+  st.subheader("Saved Presumptive Taxation Declarations Log")
+  try:
+    pres_log = (
+        supabase.table("presumptive_taxation_records")
+        .select("*")
+        .eq("client_id", selected_client_id)
+        .execute()
+    )
+    if pres_log.data:
+      st.dataframe(pd.DataFrame(pres_log.data), use_container_width=True)
+    else:
+      st.info("No presumptive records found for this client.")
+  except Exception as e:
+    st.error(f"Error loading presumptive declarations: {str(e)}")
+
+
 # --- MAIN NAVIGATION ---
 def main():
   st.title("💼 Income Tax & Wealth Management Suite")
@@ -2643,6 +2876,7 @@ def main():
       tab11,
       tab12,
       tab13,
+      tab14,
   ) = st.tabs([
       "Module 1: Profile",
       "Module 2: Questionnaire",
@@ -2657,6 +2891,7 @@ def main():
       "Module 11: Schedule AL",
       "Module 12: Schedule FA & TR",
       "Module 13: Advance Tax Tracker",
+      "Module 14: Presumptive Taxation",
   ])
 
   with tab1:
@@ -2685,6 +2920,8 @@ def main():
     render_module_12()
   with tab13:
     render_module_13()
+  with tab14:
+    render_module_14()
 
 
 if __name__ == "__main__":
