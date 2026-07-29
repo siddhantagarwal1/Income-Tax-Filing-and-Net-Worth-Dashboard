@@ -1,6 +1,7 @@
 import io
 import json
 import re
+from datetime import datetime
 import pandas as pd
 import pdfplumber
 import streamlit as st
@@ -128,6 +129,86 @@ def auto_categorize_transaction(description: str) -> tuple:
     return "Contra / Internal Transfer", "N/A (Excluded)"
 
   return "Uncategorized", "Review Needed"
+
+
+# --- MODULE 7 CAPITAL GAINS ENGINE ---
+def compute_capital_gains(
+    asset_type: str,
+    acq_date,
+    transfer_date,
+    sale_consideration: float,
+    cost_acq: float,
+    cost_imp: float,
+    transfer_exp: float,
+    fmv_2018: float,
+) -> dict:
+  holding_days = (transfer_date - acq_date).days
+
+  net_sale_consideration = sale_consideration - transfer_exp
+  stcg = 0.0
+  ltcg = 0.0
+  tax_rate = 0.0
+  section = ""
+
+  if asset_type in [
+      "Listed Equity Shares",
+      "Equity Oriented Mutual Funds",
+  ]:
+    if holding_days > 365:
+      effective_cost = (
+          max(cost_acq, min(sale_consideration, fmv_2018))
+          if fmv_2018 > 0
+          else cost_acq
+      )
+      ltcg = net_sale_consideration - (effective_cost + cost_imp)
+      tax_rate = 12.50
+      section = "Sec 112A"
+    else:
+      stcg = net_sale_consideration - (cost_acq + cost_imp)
+      tax_rate = 20.00
+      section = "Sec 111A"
+
+  elif asset_type in ["Unlisted Shares", "Real Estate / Immovable Property"]:
+    if holding_days > 730:
+      ltcg = net_sale_consideration - (cost_acq + cost_imp)
+      tax_rate = 12.50
+      section = "Sec 112"
+    else:
+      stcg = net_sale_consideration - (cost_acq + cost_imp)
+      tax_rate = 0.0  # Slab Rate
+      section = "Sec 45 / Slab"
+
+  elif asset_type == "Debt Mutual Funds":
+    stcg = net_sale_consideration - (cost_acq + cost_imp)
+    tax_rate = 0.0  # Slab Rate
+    section = "Sec 50AA"
+
+  elif asset_type == "Sovereign Gold Bonds (SGB)":
+    if holding_days > 730:
+      ltcg = net_sale_consideration - (cost_acq + cost_imp)
+      tax_rate = 12.50
+      section = "Sec 112 / Sec 47(viib)"
+    else:
+      stcg = net_sale_consideration - (cost_acq + cost_imp)
+      tax_rate = 0.0
+      section = "Sec 45 / Slab"
+
+  else:
+    if holding_days > 1095:
+      ltcg = net_sale_consideration - (cost_acq + cost_imp)
+      tax_rate = 20.00
+      section = "Sec 112"
+    else:
+      stcg = net_sale_consideration - (cost_acq + cost_imp)
+      tax_rate = 0.0
+      section = "Sec 45 / Slab"
+
+  return {
+      "stcg": max(0.0, stcg) if stcg > 0 else stcg,
+      "ltcg": max(0.0, ltcg) if ltcg > 0 else ltcg,
+      "tax_rate": tax_rate,
+      "section": section,
+  }
 
 
 # --- MODULE 1 RENDER ---
@@ -668,9 +749,7 @@ def render_module_5():
         ],
     )
 
-    template_approved = st.checkbox(
-        "Confirm Template Mapping", value=False
-    )
+    template_approved = st.checkbox("Confirm Template Mapping", value=False)
     data_accuracy_approved = st.checkbox(
         "Verify Extracted Data Accuracy", value=False
     )
@@ -927,16 +1006,214 @@ def render_module_6():
       st.error(f"Failed to generate Excel file: {str(e)}")
 
 
+# --- MODULE 7 RENDER ---
+def render_module_7():
+  st.header("Module 7: Capital Gains & Securities Portfolio Engine")
+
+  try:
+    clients_res = (
+        supabase.table("client_profiles")
+        .select("id, full_legal_name, pan")
+        .execute()
+    )
+    clients = clients_res.data
+  except Exception as e:
+    st.error(f"Failed to fetch client list: {str(e)}")
+    clients = []
+
+  if not clients:
+    st.warning("Please add at least one client profile in Module 1 first.")
+    return
+
+  client_options = {
+      f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
+  }
+  selected_client_label = st.selectbox(
+      "Select Active Client*", list(client_options.keys()), key="m7_client"
+  )
+  selected_client_id = client_options[selected_client_label]
+
+  st.subheader("Record Capital Asset Transfer / Transaction")
+  with st.form("cg_transaction_form"):
+    col1, col2 = st.columns(2)
+    with col1:
+      asset_type = st.selectbox(
+          "Asset Class*",
+          [
+              "Listed Equity Shares",
+              "Equity Oriented Mutual Funds",
+              "Debt Mutual Funds",
+              "Unlisted Shares",
+              "Real Estate / Immovable Property",
+              "Sovereign Gold Bonds (SGB)",
+              "Bonds / Debentures",
+              "Other Assets",
+          ],
+      )
+      asset_name = st.text_input("Asset Name / Security Description*")
+      isin_code = st.text_input("ISIN Code (if applicable)")
+      quantity = st.number_input("Quantity / Units", min_value=0.0001, value=1.0)
+      acq_date = st.date_input("Acquisition Date*")
+
+    with col2:
+      transfer_date = st.date_input("Transfer / Sale Date*")
+      sale_consideration = st.number_input(
+          "Sale Consideration (₹)*", min_value=0.0, step=1000.0
+      )
+      cost_acq = st.number_input(
+          "Cost of Acquisition (₹)*", min_value=0.0, step=1000.0
+      )
+      cost_imp = st.number_input(
+          "Cost of Improvement (₹)", min_value=0.0, step=1000.0
+      )
+      transfer_exp = st.number_input(
+          "Transfer Expenses / Brokerage (₹)", min_value=0.0, step=100.0
+      )
+      fmv_2018 = st.number_input(
+          "FMV as on 31-Jan-2018 (Sec 112A Grandfathering)",
+          min_value=0.0,
+          step=1000.0,
+      )
+
+    submitted = st.form_submit_button("Compute & Record Capital Gain")
+
+    if submitted:
+      if not asset_name or transfer_date <= acq_date:
+        st.error(
+            "Please provide asset name and ensure Transfer Date is after"
+            " Acquisition Date."
+        )
+      else:
+        cg_computed = compute_capital_gains(
+            asset_type=asset_type,
+            acq_date=acq_date,
+            transfer_date=transfer_date,
+            sale_consideration=sale_consideration,
+            cost_acq=cost_acq,
+            cost_imp=cost_imp,
+            transfer_exp=transfer_exp,
+            fmv_2018=fmv_2018,
+        )
+
+        payload = {
+            "client_id": selected_client_id,
+            "asset_type": asset_type,
+            "asset_name": asset_name,
+            "isin_code": isin_code if isin_code else None,
+            "quantity": quantity,
+            "acquisition_date": str(acq_date),
+            "transfer_date": str(transfer_date),
+            "sale_consideration": sale_consideration,
+            "cost_of_acquisition": cost_acq,
+            "cost_of_improvement": cost_imp,
+            "transfer_expenses": transfer_exp,
+            "fmv_as_on_jan_31_2018": fmv_2018,
+            "computed_stcg": cg_computed["stcg"],
+            "computed_ltcg": cg_computed["ltcg"],
+            "applicable_tax_rate": cg_computed["tax_rate"],
+            "it_act_section": cg_computed["section"],
+        }
+
+        try:
+          supabase.table("capital_gains_portfolio").insert(payload).execute()
+          st.success("Capital gains transaction saved & computed successfully!")
+          st.rerun()
+        except Exception as e:
+          st.error(f"Database error: {str(e)}")
+
+  st.markdown("---")
+  st.subheader("Capital Gains Ledger Register")
+
+  try:
+    cg_res = (
+        supabase.table("capital_gains_portfolio")
+        .select("*")
+        .eq("client_id", selected_client_id)
+        .order("transfer_date", desc=True)
+        .execute()
+    )
+    cg_data = cg_res.data
+
+    if cg_data:
+      cg_df = pd.DataFrame(cg_data)
+      display_cols = [
+          "asset_type",
+          "asset_name",
+          "acquisition_date",
+          "transfer_date",
+          "sale_consideration",
+          "cost_of_acquisition",
+          "computed_stcg",
+          "computed_ltcg",
+          "applicable_tax_rate",
+          "it_act_section",
+      ]
+      st.dataframe(cg_df[display_cols], use_container_width=True)
+    else:
+      st.info("No capital gains transactions recorded for this client.")
+  except Exception as e:
+    st.error(f"Error fetching capital gains ledger: {str(e)}")
+
+  st.markdown("---")
+  st.subheader("Export Capital Gains Portfolio")
+
+  if st.button("Fetch & Prepare Capital Gains Excel Export"):
+    try:
+      response = (
+          supabase.table("capital_gains_portfolio")
+          .select("*, client_profiles(full_legal_name, pan)")
+          .eq("client_id", selected_client_id)
+          .execute()
+      )
+      data = response.data
+      if data:
+        flattened = []
+        for row in data:
+          client_info = row.get("client_profiles", {}) or {}
+          flattened.append({
+              "Client Name": client_info.get("full_legal_name"),
+              "PAN": client_info.get("pan"),
+              "Asset Class": row.get("asset_type"),
+              "Asset Name": row.get("asset_name"),
+              "ISIN": row.get("isin_code"),
+              "Acquisition Date": row.get("acquisition_date"),
+              "Transfer Date": row.get("transfer_date"),
+              "Sale Consideration": row.get("sale_consideration"),
+              "Cost of Acquisition": row.get("cost_of_acquisition"),
+              "STCG": row.get("computed_stcg"),
+              "LTCG": row.get("computed_ltcg"),
+              "Tax Rate (%)": row.get("applicable_tax_rate"),
+              "Section": row.get("it_act_section"),
+          })
+        df_export = pd.DataFrame(flattened)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+          df_export.to_excel(writer, index=False, sheet_name="Capital_Gains")
+        excel_data = output.getvalue()
+
+        st.download_button(
+            label="📥 Download Module 7 Capital Gains Register (Excel)",
+            data=excel_data,
+            file_name="Module_7_Capital_Gains.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+      else:
+        st.info("No capital gains records found to export.")
+    except Exception as e:
+      st.error(f"Failed to generate Excel file: {str(e)}")
+
+
 # --- MAIN NAVIGATION ---
 def main():
   st.title("💼 Income Tax & Wealth Management Suite")
-  tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+  tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
       "Module 1: Client Profile",
       "Module 2: Statutory Questionnaire",
       "Module 3: Document Vault",
       "Module 4: Parsing Engine",
       "Module 5: Validation & Mapping",
       "Module 6: Bank Ledger",
+      "Module 7: Capital Gains",
   ])
 
   with tab1:
@@ -951,6 +1228,8 @@ def main():
     render_module_5()
   with tab6:
     render_module_6()
+  with tab7:
+    render_module_7()
 
 
 if __name__ == "__main__":
