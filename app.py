@@ -131,7 +131,7 @@ def auto_categorize_transaction(description: str) -> tuple:
   return "Uncategorized", "Review Needed"
 
 
-# --- MODULE 7 CAPITAL GAINS ENGINE ---
+# --- MODULE 8 CAPITAL GAINS ENGINE ---
 def compute_capital_gains(
     asset_type: str,
     acq_date,
@@ -213,7 +213,7 @@ def compute_capital_gains(
   }
 
 
-# --- MODULE 8 COMPUTATION LOGIC ---
+# --- MODULE 9 COMPUTATION LOGIC ---
 def compute_sgb_debt_taxation(
     instrument_type: str,
     units: float,
@@ -275,7 +275,7 @@ def compute_sgb_debt_taxation(
   }
 
 
-# --- MODULE 10 COMPUTATION ENGINE ---
+# --- MODULE 11 COMPUTATION ENGINE ---
 def compute_total_tax_liability(
     salary: float,
     house_prop: float,
@@ -347,7 +347,7 @@ def compute_total_tax_liability(
   }
 
 
-# --- MODULE 13 COMPUTATION LOGIC ---
+# --- MODULE 14 COMPUTATION LOGIC ---
 def compute_advance_tax_schedule(
     net_tax_liability: float,
     projected_tds: float,
@@ -436,7 +436,7 @@ def compute_advance_tax_schedule(
   }
 
 
-# --- MODULE 14 COMPUTATION LOGIC ---
+# --- MODULE 15 COMPUTATION LOGIC ---
 def compute_presumptive_taxation(
     section_code: str,
     gross_digital: float,
@@ -490,7 +490,7 @@ def compute_presumptive_taxation(
       is_audit_required = True
       audit_reason = "Vehicle count exceeds maximum threshold of 10 for Sec 44AE."
     else:
-      heavy_min = heavy_vehicles * 1000 * 1000 * holding_months  # Rs 1000 per ton per month
+      heavy_min = heavy_vehicles * 1000 * 1000 * holding_months
       other_min = other_vehicles * 7500 * holding_months
       computed_min_income = heavy_min + other_min
       if declared_income < computed_min_income:
@@ -1302,7 +1302,7 @@ def render_module_6():
 
 # --- MODULE 7 RENDER ---
 def render_module_7():
-  st.header("Module 7: Capital Gains & Securities Portfolio Engine")
+  st.header("Module 7: Double-Entry General Ledger & Trial Balance Engine")
 
   try:
     clients_res = (
@@ -1324,6 +1324,235 @@ def render_module_7():
   }
   selected_client_label = st.selectbox(
       "Select Active Client*", list(client_options.keys()), key="m7_client"
+  )
+  selected_client_id = client_options[selected_client_label]
+
+  tab_coa, tab_journal, tab_tb = st.tabs(
+      ["Chart of Accounts", "Journal Entry Voucher", "Trial Balance Summary"]
+  )
+
+  with tab_coa:
+    st.subheader("Chart of Accounts Master Setup")
+    with st.form("coa_master_form"):
+      c1, c2 = st.columns(2)
+      with c1:
+        account_code = st.text_input("Account Code (e.g., 1001, 4001)*")
+        account_name = st.text_input("Account Name*")
+      with c2:
+        account_type = st.selectbox(
+            "Account Type*", ["Asset", "Liability", "Equity", "Revenue", "Expense"]
+        )
+        it_schedule_mapping = st.selectbox(
+            "Income Tax Schedule Mapping",
+            [
+                "Schedule BP - Business Profits",
+                "Schedule CG - Capital Gains",
+                "Schedule OS - Other Sources",
+                "Schedule BS - Balance Sheet",
+                "Not Applicable",
+            ],
+        )
+
+      sub_coa = st.form_submit_button("Save Account to COA")
+      if sub_coa:
+        if not account_code or not account_name:
+          st.error("Account Code and Account Name are required.")
+        else:
+          payload = {
+              "client_id": selected_client_id,
+              "account_code": account_code,
+              "account_name": account_name,
+              "account_type": account_type,
+              "it_schedule_mapping": it_schedule_mapping,
+          }
+          try:
+            supabase.table("chart_of_accounts").upsert(
+                payload, on_conflict="client_id, account_code"
+            ).execute()
+            st.success("Chart of Accounts entry successfully saved!")
+            st.rerun()
+          except Exception as e:
+            st.error(f"Database error: {str(e)}")
+
+    st.markdown("---")
+    st.subheader("Chart of Accounts Register")
+    try:
+      coa_res = (
+          supabase.table("chart_of_accounts")
+          .select("*")
+          .eq("client_id", selected_client_id)
+          .execute()
+      )
+      if coa_res.data:
+        st.dataframe(pd.DataFrame(coa_res.data), use_container_width=True)
+      else:
+        st.info("No chart of accounts created for this client.")
+    except Exception as e:
+      st.error(f"Error fetching COA: {str(e)}")
+
+  with tab_journal:
+    st.subheader("Post Balanced Journal Entry Voucher")
+    try:
+      coa_res = (
+          supabase.table("chart_of_accounts")
+          .select("id, account_code, account_name")
+          .eq("client_id", selected_client_id)
+          .execute()
+      )
+      coa_accounts = coa_res.data or []
+    except Exception:
+      coa_accounts = []
+
+    if not coa_accounts:
+      st.warning(
+          "Please configure Chart of Accounts first before posting vouchers."
+      )
+    else:
+      coa_dict = {
+          f"{acc['account_code']} - {acc['account_name']}": acc["id"]
+          for acc in coa_accounts
+      }
+
+      with st.form("journal_voucher_form"):
+        v1, v2 = st.columns(2)
+        with v1:
+          entry_date = st.date_input("Voucher Date*")
+          voucher_number = st.text_input("Voucher / Ref Number")
+        with v2:
+          narration = st.text_area("Journal Entry Narration / Particulars*")
+
+        st.markdown("#### Double-Entry Split Leg Details")
+        l1, l2 = st.columns(2)
+        with l1:
+          st.markdown("**Debit Leg**")
+          dr_acc = st.selectbox("Debit Account*", list(coa_dict.keys()), key="dr_acc")
+          dr_amt = st.number_input("Debit Amount (₹)*", min_value=0.0, step=100.0)
+
+        with l2:
+          st.markdown("**Credit Leg**")
+          cr_acc = st.selectbox("Credit Account*", list(coa_dict.keys()), key="cr_acc")
+          cr_amt = st.number_input("Credit Amount (₹)*", min_value=0.0, step=100.0)
+
+        sub_jv = st.form_submit_button("Post Journal Entry")
+
+        if sub_jv:
+          if dr_amt <= 0 or cr_amt <= 0:
+            st.error("Debit and Credit amounts must be greater than zero.")
+          elif dr_amt != cr_amt:
+            st.error(
+                f"Double-entry out of balance! Debit (₹{dr_amt:,.2f}) must equal"
+                f" Credit (₹{cr_amt:,.2f})."
+            )
+          elif dr_acc == cr_acc:
+            st.error("Debit and Credit accounts must be different.")
+          else:
+            try:
+              jv_payload = {
+                  "client_id": selected_client_id,
+                  "entry_date": str(entry_date),
+                  "voucher_number": voucher_number,
+                  "narration": narration,
+                  "source_module": "MANUAL_JOURNAL",
+              }
+              jv_res = (
+                  supabase.table("journal_entries").insert(jv_payload).execute()
+              )
+              jv_id = jv_res.data[0]["id"]
+
+              items_payload = [
+                  {
+                      "journal_entry_id": jv_id,
+                      "account_id": coa_dict[dr_acc],
+                      "debit_amount": dr_amt,
+                      "credit_amount": 0.0,
+                  },
+                  {
+                      "journal_entry_id": jv_id,
+                      "account_id": coa_dict[cr_acc],
+                      "debit_amount": 0.0,
+                      "credit_amount": cr_amt,
+                  },
+              ]
+              supabase.table("journal_entry_items").insert(
+                  items_payload
+              ).execute()
+              st.success("Double-entry journal voucher successfully posted!")
+              st.rerun()
+            except Exception as e:
+              st.error(f"Failed to post journal entry: {str(e)}")
+
+  with tab_tb:
+    st.subheader("Real-Time Trial Balance Statement")
+    try:
+      tb_res = (
+          supabase.table("journal_entry_items")
+          .select("debit_amount, credit_amount, chart_of_accounts(account_code, account_name, account_type), journal_entries!inner(client_id)")
+          .eq("journal_entries.client_id", selected_client_id)
+          .execute()
+      )
+      tb_data = tb_res.data
+
+      if tb_data:
+        tb_list = []
+        for row in tb_data:
+          acc_info = row.get("chart_of_accounts", {}) or {}
+          tb_list.append({
+              "Account Code": acc_info.get("account_code"),
+              "Account Name": acc_info.get("account_name"),
+              "Type": acc_info.get("account_type"),
+              "Debit": float(row.get("debit_amount", 0.0)),
+              "Credit": float(row.get("credit_amount", 0.0)),
+          })
+        df_tb_raw = pd.DataFrame(tb_list)
+        df_tb = (
+            df_tb_raw.groupby(["Account Code", "Account Name", "Type"])
+            .agg({"Debit": "sum", "Credit": "sum"})
+            .reset_index()
+        )
+
+        total_dr = df_tb["Debit"].sum()
+        total_cr = df_tb["Credit"].sum()
+
+        st.dataframe(df_tb, use_container_width=True)
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total Debits", f"₹{total_dr:,.2f}")
+        m2.metric("Total Credits", f"₹{total_cr:,.2f}")
+        if round(total_dr, 2) == round(total_cr, 2):
+          m3.metric("Trial Balance Status", "BALANCED ✅")
+        else:
+          m3.metric("Trial Balance Status", "OUT OF BALANCE ⚠️")
+
+      else:
+        st.info("No ledger entries available to generate Trial Balance.")
+    except Exception as e:
+      st.error(f"Error compiling Trial Balance: {str(e)}")
+
+
+# --- MODULE 8 RENDER ---
+def render_module_8():
+  st.header("Module 8: Capital Gains & Securities Portfolio Engine")
+
+  try:
+    clients_res = (
+        supabase.table("client_profiles")
+        .select("id, full_legal_name, pan")
+        .execute()
+    )
+    clients = clients_res.data
+  except Exception as e:
+    st.error(f"Failed to fetch client list: {str(e)}")
+    clients = []
+
+  if not clients:
+    st.warning("Please add at least one client profile in Module 1 first.")
+    return
+
+  client_options = {
+      f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
+  }
+  selected_client_label = st.selectbox(
+      "Select Active Client*", list(client_options.keys()), key="m8_client"
   )
   selected_client_id = client_options[selected_client_label]
 
@@ -1502,9 +1731,9 @@ def render_module_7():
         excel_data = output.getvalue()
 
         st.download_button(
-            label="📥 Download Module 7 Capital Gains Portfolio (Excel)",
+            label="📥 Download Module 8 Capital Gains Portfolio (Excel)",
             data=excel_data,
-            file_name="Module_7_Capital_Gains.xlsx",
+            file_name="Module_8_Capital_Gains.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
       else:
@@ -1513,9 +1742,9 @@ def render_module_7():
       st.error(f"Failed to generate Excel file: {str(e)}")
 
 
-# --- MODULE 8 RENDER ---
-def render_module_8():
-  st.header("Module 8: Sovereign Gold Bond (SGB) & Debt Portfolio Engine")
+# --- MODULE 9 RENDER ---
+def render_module_9():
+  st.header("Module 9: Sovereign Gold Bond (SGB) & Debt Portfolio Engine")
 
   try:
     clients_res = (
@@ -1536,7 +1765,7 @@ def render_module_8():
       f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
   }
   selected_client_label = st.selectbox(
-      "Select Active Client*", list(client_options.keys()), key="m8_client"
+      "Select Active Client*", list(client_options.keys()), key="m9_client"
   )
   selected_client_id = client_options[selected_client_label]
 
@@ -1668,9 +1897,9 @@ def render_module_8():
     st.error(f"Error fetching portfolio: {str(e)}")
 
 
-# --- MODULE 9 RENDER ---
-def render_module_9():
-  st.header("Module 9: AIS/TIS Cross-Reconciliation & Discrepancy Engine")
+# --- MODULE 10 RENDER ---
+def render_module_10():
+  st.header("Module 10: AIS/TIS Cross-Reconciliation & Discrepancy Engine")
 
   try:
     clients_res = (
@@ -1691,7 +1920,7 @@ def render_module_9():
       f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
   }
   selected_client_label = st.selectbox(
-      "Select Active Client*", list(client_options.keys()), key="m9_client"
+      "Select Active Client*", list(client_options.keys()), key="m10_client"
   )
   selected_client_id = client_options[selected_client_label]
 
@@ -1842,9 +2071,9 @@ def render_module_9():
         excel_data = output.getvalue()
 
         st.download_button(
-            label="📥 Download Module 9 AIS/TIS Register (Excel)",
+            label="📥 Download Module 10 AIS/TIS Register (Excel)",
             data=excel_data,
-            file_name="Module_9_AIS_TIS_Reconciliation.xlsx",
+            file_name="Module_10_AIS_TIS_Reconciliation.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
       else:
@@ -1853,10 +2082,10 @@ def render_module_9():
       st.error(f"Failed to generate Excel file: {str(e)}")
 
 
-# --- MODULE 10 RENDER ---
-def render_module_10():
+# --- MODULE 11 RENDER ---
+def render_module_11():
   st.header(
-      "Module 10: Five Heads of Income & Final Tax Computation Dashboard"
+      "Module 11: Five Heads of Income & Final Tax Computation Dashboard"
   )
 
   try:
@@ -1878,7 +2107,7 @@ def render_module_10():
       f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
   }
   selected_client_label = st.selectbox(
-      "Select Active Client*", list(client_options.keys()), key="m10_client"
+      "Select Active Client*", list(client_options.keys()), key="m11_client"
   )
   selected_client_id = client_options[selected_client_label]
 
@@ -2077,9 +2306,9 @@ def render_module_10():
         excel_data = output.getvalue()
 
         st.download_button(
-            label="📥 Download Module 10 Tax Computation (Excel)",
+            label="📥 Download Module 11 Tax Computation (Excel)",
             data=excel_data,
-            file_name="Module_10_Tax_Computation.xlsx",
+            file_name="Module_11_Tax_Computation.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
       else:
@@ -2088,10 +2317,10 @@ def render_module_10():
       st.error(f"Failed to generate Excel file: {str(e)}")
 
 
-# --- MODULE 11 RENDER ---
-def render_module_11():
+# --- MODULE 12 RENDER ---
+def render_module_12():
   st.header(
-      "Module 11: Comprehensive Wealth & Net Worth Statement (Schedule AL)"
+      "Module 12: Comprehensive Wealth & Net Worth Statement (Schedule AL)"
   )
 
   try:
@@ -2113,7 +2342,7 @@ def render_module_11():
       f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
   }
   selected_client_label = st.selectbox(
-      "Select Active Client*", list(client_options.keys()), key="m11_client"
+      "Select Active Client*", list(client_options.keys()), key="m12_client"
   )
   selected_client_id = client_options[selected_client_label]
 
@@ -2340,19 +2569,19 @@ def render_module_11():
 
       excel_data = output.getvalue()
       st.download_button(
-          label="📥 Download Module 11 Net Worth Statement (Excel)",
+          label="📥 Download Module 12 Net Worth Statement (Excel)",
           data=excel_data,
-          file_name=f"Module_11_Net_Worth_Statement_{financial_year}.xlsx",
+          file_name=f"Module_12_Net_Worth_Statement_{financial_year}.xlsx",
           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       )
     except Exception as e:
       st.error(f"Failed to generate Excel file: {str(e)}")
 
 
-# --- MODULE 12 RENDER ---
-def render_module_12():
+# --- MODULE 13 RENDER ---
+def render_module_13():
   st.header(
-      "Module 12: Foreign Assets (Schedule FA) & Foreign Tax Credit (Schedule"
+      "Module 13: Foreign Assets (Schedule FA) & Foreign Tax Credit (Schedule"
       " TR / Form 67)"
   )
 
@@ -2375,7 +2604,7 @@ def render_module_12():
       f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
   }
   selected_client_label = st.selectbox(
-      "Select Active Client*", list(client_options.keys()), key="m12_client"
+      "Select Active Client*", list(client_options.keys()), key="m13_client"
   )
   selected_client_id = client_options[selected_client_label]
 
@@ -2540,9 +2769,9 @@ def render_module_12():
       st.error(f"Error fetching Schedule TR data: {str(e)}")
 
 
-# --- MODULE 13 RENDER ---
-def render_module_13():
-  st.header("Module 13: Advance Tax Computation & Due Date Tracker Engine")
+# --- MODULE 14 RENDER ---
+def render_module_14():
+  st.header("Module 14: Advance Tax Computation & Due Date Tracker Engine")
 
   try:
     clients_res = (
@@ -2563,7 +2792,7 @@ def render_module_13():
       f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
   }
   selected_client_label = st.selectbox(
-      "Select Active Client*", list(client_options.keys()), key="m13_client"
+      "Select Active Client*", list(client_options.keys()), key="m14_client"
   )
   selected_client_id = client_options[selected_client_label]
 
@@ -2688,10 +2917,10 @@ def render_module_13():
     st.error(f"Error loading advance tax schedules: {str(e)}")
 
 
-# --- MODULE 14 RENDER ---
-def render_module_14():
+# --- MODULE 15 RENDER ---
+def render_module_15():
   st.header(
-      "Module 14: Presumptive Taxation Engine (Sec 44AD, Sec 44ADA & Sec 44AE)"
+      "Module 15: Presumptive Taxation Engine (Sec 44AD, Sec 44ADA & Sec 44AE)"
   )
 
   try:
@@ -2713,7 +2942,7 @@ def render_module_14():
       f"{c['full_legal_name']} ({c['pan']})": c["id"] for c in clients
   }
   selected_client_label = st.selectbox(
-      "Select Active Client*", list(client_options.keys()), key="m14_client"
+      "Select Active Client*", list(client_options.keys()), key="m15_client"
   )
   selected_client_id = client_options[selected_client_label]
 
@@ -2722,7 +2951,7 @@ def render_module_14():
     col1, col2 = st.columns(2)
     with col1:
       ay_pres = st.selectbox(
-          "Assessment Year*", ["2026-27", "2025-26"], key="m14_ay"
+          "Assessment Year*", ["2026-27", "2025-26"], key="m15_ay"
       )
       section_code = st.selectbox(
           "Presumptive Section Provision*",
@@ -2877,6 +3106,7 @@ def main():
       tab12,
       tab13,
       tab14,
+      tab15,
   ) = st.tabs([
       "Module 1: Profile",
       "Module 2: Questionnaire",
@@ -2884,14 +3114,15 @@ def main():
       "Module 4: Parser",
       "Module 5: Validation",
       "Module 6: Bank Ledger",
-      "Module 7: Capital Gains",
-      "Module 8: SGB & Debt",
-      "Module 9: AIS/TIS Reconcile",
-      "Module 10: Tax Computation",
-      "Module 11: Schedule AL",
-      "Module 12: Schedule FA & TR",
-      "Module 13: Advance Tax Tracker",
-      "Module 14: Presumptive Taxation",
+      "Module 7: General Ledger",
+      "Module 8: Capital Gains",
+      "Module 9: SGB & Debt",
+      "Module 10: AIS/TIS Reconcile",
+      "Module 11: Tax Computation",
+      "Module 12: Schedule AL",
+      "Module 13: Schedule FA & TR",
+      "Module 14: Advance Tax Tracker",
+      "Module 15: Presumptive Taxation",
   ])
 
   with tab1:
@@ -2915,12 +3146,14 @@ def main():
   with tab10:
     render_module_10()
   with tab11:
-    render_module_11()
+    render_module_10()
   with tab12:
-    render_module_12()
+    render_module_11()
   with tab13:
-    render_module_13()
+    render_module_12()
   with tab14:
+    render_module_13()
+  with tab15:
     render_module_14()
 
 
