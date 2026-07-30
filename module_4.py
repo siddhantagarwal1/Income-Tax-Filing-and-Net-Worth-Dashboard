@@ -246,7 +246,6 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                 balance = num_amounts[-1] if len(num_amounts) >= 1 else 0.0
                 txn_amount = num_amounts[-2] if len(num_amounts) >= 2 else num_amounts[0]
 
-                # Direction Evaluation prioritizing AUTO DEBIT over generic 'CR' matching
                 is_explicit_debit = any(kw in line_upper for kw in DEBIT_KEYWORDS)
                 is_explicit_credit = any(kw in line_upper for kw in CREDIT_KEYWORDS) or bool(re.search(r"\bCR\b", line_upper))
 
@@ -268,13 +267,14 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     "running_balance": balance,
                 })
 
-    # 3. Deduplication Pass across Multi-Page Boundaries
+    # 3. Enhanced Deduplication Pass (Accounting State Matching)
     unique_ledger = []
-    seen_rows = set()
+    seen_states = set()
     for item in ledger:
-        row_key = (item["date"], item["description"], item["debit"], item["credit"], item["running_balance"])
-        if row_key not in seen_rows:
-            seen_rows.add(row_key)
+        # Match by date, amount, debit/credit split, and exact resulting running balance
+        state_key = (item["date"], item["debit"], item["credit"], item["running_balance"])
+        if state_key not in seen_states:
+            seen_states.add(state_key)
             unique_ledger.append(item)
 
     # Tax Classification Engine with Normalized Whitespace
