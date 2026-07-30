@@ -6,24 +6,24 @@ from supabase import create_client, Client
 # --- Page Configuration ---
 st.set_page_config(page_title="Tax & Wealth OS", layout="wide")
 
-# --- Custom Styling (Executive Dark & Royal Blue Theme) ---
+# --- Custom Styling (Executive White & Royal Blue Accents) ---
 st.markdown(
     """
     <style>
-    /* Main App Background */
+    /* Main App Background - Clean Light */
     .stApp {
-        background-color: #0b132b;
-        color: #ffffff;
+        background-color: #ffffff;
+        color: #1d1d1f;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     }
     
     /* Sidebar Styling */
     section[data-testid="stSidebar"] {
-        background-color: #1c2541;
-        border-right: 1px solid #3a506b;
+        background-color: #f8fafc;
+        border-right: 1px solid #e2e8f0;
     }
     
-    /* Headers & Navigation Cards */
+    /* Navigation Headers */
     .sidebar-header {
         background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%);
         color: #ffffff;
@@ -32,12 +32,12 @@ st.markdown(
         font-weight: 700;
         font-size: 18px;
         margin-bottom: 14px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
     }
     
     .sidebar-subheader {
-        background-color: #1c2541;
-        color: #93c5fd;
+        background-color: #eff6ff;
+        color: #1d4ed8;
         padding: 8px 12px;
         border-radius: 6px;
         font-weight: 600;
@@ -45,17 +45,16 @@ st.markdown(
         text-transform: uppercase;
         letter-spacing: 0.8px;
         margin-bottom: 12px;
-        border: 1px solid #3a506b;
+        border: 1px solid #bfdbfe;
     }
     
     /* Module Header Block */
     .module-header-container {
         background: linear-gradient(135deg, #1e3a8a 0%, #1d4ed8 100%);
-        border: 1px solid #3b82f6;
         border-radius: 12px;
         padding: 24px;
         margin-bottom: 24px;
-        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
+        box-shadow: 0 4px 14px rgba(29, 78, 216, 0.2);
     }
     
     .module-title {
@@ -72,13 +71,13 @@ st.markdown(
         margin-top: 6px;
     }
     
-    /* Input Form Containers */
+    /* Form Container */
     div[data-testid="stForm"] {
-        background-color: #1c2541;
-        border: 1px solid #3a506b;
+        background-color: #ffffff;
+        border: 1px solid #e2e8f0;
         border-radius: 12px;
         padding: 24px;
-        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
     }
     </style>
     """,
@@ -205,13 +204,11 @@ if selected_module == "Module 1: Basic Profile Details":
         if records:
             df = pd.DataFrame(records)
             
-            # Display View (Simplified for cleaner UI)
             display_df = df[["full_name_pan", "pan"]].rename(
                 columns={"full_name_pan": "Client Name", "pan": "PAN"}
             )
             st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-            # Full Export Option (Includes all profile attributes)
             full_csv = df.to_csv(index=False)
             st.download_button(
                 label="Download Full Client Profiles (CSV)",
