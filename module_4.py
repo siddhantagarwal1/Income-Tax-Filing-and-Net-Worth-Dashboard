@@ -125,7 +125,7 @@ def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
 
 
 def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, layout_meta: dict) -> dict:
-    """Multi-page table & text parsing engine with word-boundary direction rules and deduplication."""
+    """Multi-page table & text parsing engine with strict state deduplication and direction resolution."""
     ledger = []
     STRICT_CURRENCY_REGEX = r"^\d{1,3}(,\d{2,3})*\.\d{2}$|^\d+\.\d{2}$"
 
@@ -267,17 +267,18 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     "running_balance": balance,
                 })
 
-    # 3. Enhanced Deduplication Pass (Accounting State Matching)
+    # 3. Robust Deduplication (Combines Date, Debit, Credit, and Truncated Description Anchor)
     unique_ledger = []
-    seen_states = set()
+    seen_transactions = set()
     for item in ledger:
-        # Match by date, amount, debit/credit split, and exact resulting running balance
-        state_key = (item["date"], item["debit"], item["credit"], item["running_balance"])
-        if state_key not in seen_states:
-            seen_states.add(state_key)
+        desc_prefix = re.sub(r"\s+", "", item["description"])[:25].upper()
+        dedup_key = (item["date"], item["debit"], item["credit"], desc_prefix)
+        
+        if dedup_key not in seen_transactions:
+            seen_transactions.add(dedup_key)
             unique_ledger.append(item)
 
-    # Tax Classification Engine with Normalized Whitespace
+    # Tax Classification Engine
     final_ledger = []
     for t in unique_ledger:
         if t["debit"] == 0.0 and t["credit"] == 0.0:
