@@ -123,10 +123,10 @@ def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
 
 
 def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, layout_meta: dict) -> dict:
-    """Multi-page table & text parsing engine with multi-line row stitching."""
+    """Multi-page table & text parsing engine with strict cell-index mapping and anchor balance matching."""
     ledger = []
 
-    # 1. Multi-Page Table Scanning Pass
+    # 1. Primary Structured Table Parsing Pass
     for page in pdf.pages:
         tables = page.extract_tables()
         if not tables:
@@ -136,30 +136,26 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             if not table or len(table) < 2:
                 continue
 
-            # Identify headers dynamically across all extracted tables
-            date_idx, desc_idx, dr_idx, cr_idx, bal_idx, amt_idx = -1, -1, -1, -1, -1, -1
+            date_idx, desc_idx, dr_idx, cr_idx, bal_idx = -1, -1, -1, -1, -1
             header_found = False
 
             for row_idx, row in enumerate(table):
                 header_candidate = [str(c).lower().strip() if c else "" for c in row]
                 
-                # Check for standard bank ledger column headers
                 if any(any(k in h for k in ["particulars", "description", "narration", "transaction details"]) for h in header_candidate):
                     header_found = True
                     for i, h in enumerate(header_candidate):
-                        if any(k in h for k in ["date", "txn date", "value date"]):
+                        if any(k in h for k in ["txn date", "transaction date", "date", "value date"]):
                             if date_idx == -1:
                                 date_idx = i
                         elif any(k in h for k in ["narration", "particular", "description", "details", "remark", "transaction details"]):
                             desc_idx = i
-                        elif any(k in h for k in ["debit", "withdrawal", "dr", "amount (dr)"]):
+                        elif any(k in h for k in ["debit", "withdrawal", "dr"]):
                             dr_idx = i
-                        elif any(k in h for k in ["credit", "deposit", "cr", "amount (cr)"]):
+                        elif any(k in h for k in ["credit", "deposit", "cr"]):
                             cr_idx = i
                         elif "balance" in h:
                             bal_idx = i
-                        elif "amount" in h:
-                            amt_idx = i
                     
                     data_rows = table[row_idx + 1:]
                     break
@@ -167,7 +163,6 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             if not header_found:
                 continue
 
-            # Process data rows with multi-line stitching
             current_entry = None
 
             for row in data_rows:
@@ -182,18 +177,12 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                         ledger.append(current_entry)
 
                     txn_date = date_match.group(0)
-                    desc = str(row[desc_idx]).strip() if desc_idx != -1 and desc_idx < len(row) and row[desc_idx] else row_str
+                    desc = str(row[desc_idx]).strip() if desc_idx != -1 and desc_idx < len(row) and row[desc_idx] else ""
 
-                    debit = _clean_number(row[dr_idx]) if dr_idx != -1 and dr_idx < len(row) else 0.0
-                    credit = _clean_number(row[cr_idx]) if cr_idx != -1 and cr_idx < len(row) else 0.0
-                    balance = _clean_number(row[bal_idx]) if bal_idx != -1 and bal_idx < len(row) else 0.0
-
-                    if dr_idx == -1 and cr_idx == -1 and amt_idx != -1 and amt_idx < len(row):
-                        amt_val = _clean_number(row[amt_idx])
-                        if "CR" in row_str.upper() or "DEPOSIT" in row_str.upper():
-                            credit = amt_val
-                        else:
-                            debit = amt_val
+                    # Strict Cell Index Fetching (No string fallbacks to avoid Balance shifting into Debit)
+                    debit = _clean_number(row[dr_idx]) if dr_idx != -1 and dr_idx < len(row) and row[dr_idx] else 0.0
+                    credit = _clean_number(row[cr_idx]) if cr_idx != -1 and cr_idx < len(row) and row[cr_idx] else 0.0
+                    balance = _clean_number(row[bal_idx]) if bal_idx != -1 and bal_idx < len(row) and row[bal_idx] else 0.0
 
                     current_entry = {
                         "date": txn_date,
@@ -203,14 +192,13 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                         "running_balance": balance,
                     }
                 else:
-                    # Append wrapped multi-line descriptions to existing record
                     if current_entry and desc_idx != -1 and desc_idx < len(row) and row[desc_idx]:
                         current_entry["description"] += " " + str(row[desc_idx]).strip()
 
             if current_entry:
                 ledger.append(current_entry)
 
-    # 2. Multi-Page Spatial Line-Text Fallback Pass
+    # 2. Multi-Page Spatial Line Fallback (Triggers only if Table Engine returns no ledger)
     if not ledger:
         for layout in spatial_analysis["layouts"]:
             for line in layout["lines"]:
@@ -240,7 +228,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     "running_balance": balance,
                 })
 
-    # Apply Tax Categorization & Final Field Mapping
+    # Tax Classification Engine
     final_ledger = []
     for t in ledger:
         if t["debit"] == 0.0 and t["credit"] == 0.0:
@@ -270,13 +258,25 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             "classified_category": category,
         })
 
-    # Global Multi-Page Opening/Closing Balance Anchor Resolution
+    # Summary Anchor Resolution (Extracts contiguous summary blocks like IDFC Header)
     full_text = spatial_analysis["full_text"]
-    op_match = re.search(r"(?i)(?:opening balance|b/f)\D*([\d,]+\.\d{2})", full_text)
-    cl_match = re.search(r"(?i)(?:closing balance|c/f)\D*([\d,]+\.\d{2})", full_text)
+    
+    summary_block = re.search(
+        r"Opening\s+Balance\s+Total\s+Debit\s+Total\s+Credit\s+Closing\s+Balance\s*([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})",
+        full_text,
+        re.IGNORECASE
+    )
 
-    opening_bal = _clean_number(op_match.group(1)) if op_match else (final_ledger[0]["running_balance"] - final_ledger[0]["credit"] + final_ledger[0]["debit"] if final_ledger else 0.0)
-    closing_bal = _clean_number(cl_match.group(1)) if cl_match else (final_ledger[-1]["running_balance"] if final_ledger else 0.0)
+    if summary_block:
+        opening_bal = _clean_number(summary_block.group(1))
+        extracted_debits = _clean_number(summary_block.group(2))
+        extracted_credits = _clean_number(summary_block.group(3))
+        closing_bal = _clean_number(summary_block.group(4))
+    else:
+        op_match = re.search(r"(?i)(?:opening balance|b/f)\D*([\d,]+\.\d{2})", full_text)
+        cl_match = re.search(r"(?i)(?:closing balance|c/f)\D*([\d,]+\.\d{2})", full_text)
+        opening_bal = _clean_number(op_match.group(1)) if op_match else (final_ledger[0]["running_balance"] - final_ledger[0]["credit"] + final_ledger[0]["debit"] if final_ledger else 0.0)
+        closing_bal = _clean_number(cl_match.group(1)) if cl_match else (final_ledger[-1]["running_balance"] if final_ledger else 0.0)
 
     total_credits = sum(item["credit"] for item in final_ledger)
     total_debits = sum(item["debit"] for item in final_ledger)
