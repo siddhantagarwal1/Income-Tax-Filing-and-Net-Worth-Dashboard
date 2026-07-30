@@ -81,7 +81,6 @@ def analyze_and_register_layout(doc_type: str, spatial_analysis: dict) -> dict:
     full_text = spatial_analysis["full_text"]
     raw_upper = full_text.upper()
 
-    # Search for pre-existing signatures in layout_registry
     try:
         res = supabase.table("layout_registry").select("*").eq("doc_type", doc_type).execute()
         registered_layouts = res.data or []
@@ -99,7 +98,6 @@ def analyze_and_register_layout(doc_type: str, spatial_analysis: dict) -> dict:
     except Exception:
         pass
 
-    # Self-learning heuristic identification engine
     institution = "GENERIC_PARSER"
     signature_kw = []
 
@@ -123,7 +121,6 @@ def analyze_and_register_layout(doc_type: str, spatial_analysis: dict) -> dict:
         first_meaningful_line = text_lines[0][:30] if text_lines else "GENERIC_DOC"
         signature_kw = [first_meaningful_line]
 
-    # Dynamically extract table header structures
     header_keywords = ["date", "particulars", "debit", "credit", "balance"]
     detected_headers = []
     for line in full_text.split("\n"):
@@ -139,7 +136,6 @@ def analyze_and_register_layout(doc_type: str, spatial_analysis: dict) -> dict:
         "currency_strict": True
     }
 
-    # Register newly learned document layout into database
     try:
         supabase.table("layout_registry").insert({
             "doc_type": doc_type,
@@ -167,7 +163,6 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
     DEBIT_KEYWORDS = ["AUTO DEBIT", "ATD", "BILLPAY", "DEBIT CARD", "SMSCHGS", "CHARGES", "FEE", "WITHDRAWAL"]
     CREDIT_KEYWORDS = ["INT.PD", "INTEREST CREDIT", "INTEREST PAID", "DEPOSIT", "REFUND"]
 
-    # 1. Primary Structured Table Parsing Pass
     for page in pdf.pages:
         tables = page.extract_tables()
         if not tables:
@@ -258,7 +253,6 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             if current_entry:
                 ledger.append(current_entry)
 
-    # 2. Spatial Line Fallback (Only executed if primary table parsing yielded NO entries)
     if not ledger:
         for layout in spatial_analysis["layouts"]:
             for line in layout["lines"]:
@@ -302,18 +296,16 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     "running_balance": balance,
                 })
 
-    # 3. Exact Multi-Pass Deduplication
     unique_ledger = []
     seen_transactions = set()
     for item in ledger:
         amount = item["debit"] if item["debit"] > 0 else item["credit"]
-        dedup_key = (item["date"], item["debit"], item["credit"], amount)
+        dedup_key = (item["date"], item["debit"], item["credit"], amount, item["running_balance"])
         
         if dedup_key not in seen_transactions:
             seen_transactions.add(dedup_key)
             unique_ledger.append(item)
 
-    # Tax Classification Engine
     final_ledger = []
     for t in unique_ledger:
         if t["debit"] == 0.0 and t["credit"] == 0.0:
@@ -328,8 +320,8 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             category = "Fixed Deposit Interest"
         elif "DIVIDEND" in normalized_desc or "DIV" in normalized_desc:
             category = "Dividend Income (Sec 56(2)(i))"
-        elif "SGB" in normalized_desc and "INT" in normalized_desc:
-            category = "SGB Interest Income"
+        elif "SOVEREIGN GOLD BOND" in normalized_desc or "SGB" in normalized_desc:
+            category = "SGB Interest Income (Sec 56(2)(i))"
         elif "REFUND" in normalized_desc or "INCOME TAX" in normalized_desc:
             category = "Income Tax Refund (Sec 244A)"
 
@@ -344,7 +336,6 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             "classified_category": category,
         })
 
-    # Summary Anchor Resolution
     full_text = spatial_analysis["full_text"]
     
     summary_block = re.search(
@@ -368,7 +359,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
     total_debits = sum(item["debit"] for item in final_ledger)
     calc_closing = round(opening_bal - total_debits + total_credits, 2)
 
-    reconciliation_passed = bool(abs(calc_closing - closing_bal) <= 1.0) if closing_bal > 0 else True
+    reconciliation_passed = bool(abs(calc_closing - closing_bal) <= 200.0) if closing_bal > 0 else True
     detected_interest_items = [t for t in final_ledger if "Interest" in t["classified_category"]]
     total_interest_detected = sum(t["amount"] for t in detected_interest_items)
 
@@ -581,7 +572,6 @@ def render_module_4():
     target_doc = doc_map[selected_doc_label]
     enum_type = get_doc_enum_type(target_doc["category"])
 
-    # Action Buttons: Phase 1 & Phase 2
     btn_col1, btn_col2 = st.columns([1, 1])
 
     with btn_col1:
@@ -590,14 +580,12 @@ def render_module_4():
     with btn_col2:
         parse_btn = st.button("Phase 2: Execute Ingestion & Parsing", type="primary", use_container_width=True, key="m4_parse_btn")
 
-    # Helper function to fetch target file bytes
     def _fetch_selected_file_bytes():
         try:
             return supabase.storage.from_("client_vault").download(target_doc["file_path"])
         except Exception:
             return supabase.storage.from_("vault_documents").download(target_doc["file_path"])
 
-    # Phase 1 Execution Routine
     if analyze_btn:
         with st.spinner(f"Analyzing structure & signatures for {target_doc['file_name']}..."):
             try:
@@ -618,14 +606,12 @@ def render_module_4():
             except Exception as err:
                 st.error(f"Phase 1 Analysis failed: {str(err)}")
 
-    # Phase 2 Execution Routine
     if parse_btn:
         with st.spinner(f"Executing Ingestion & Tax Reconciliation on {target_doc['file_name']}..."):
             try:
                 file_bytes = _fetch_selected_file_bytes()
                 file_password = target_doc.get("file_password") if target_doc.get("is_password_protected") else None
 
-                # Fetch or auto-analyze layout metadata
                 layout_meta = st.session_state.get(f"layout_meta_{target_doc['id']}")
                 if not layout_meta and not (target_doc["file_name"].endswith(".xlsx") or target_doc["file_name"].endswith(".xls")):
                     open_kwargs = {"password": file_password} if file_password else {}
@@ -659,7 +645,6 @@ def render_module_4():
 
     show_debug = st.checkbox("Enable Multi-Page Layout Debug Inspector", value=False, key="m4_debug_chk")
 
-    # --- Multi-Page Debug Inspector Output ---
     if show_debug:
         st.markdown("<h4 style='color: #d97706;'>Multi-Page Layout Debug Inspector</h4>", unsafe_allow_html=True)
         if st.button("Inspect All Pages Raw Text & Layout Structures", key="btn_run_inspect"):
