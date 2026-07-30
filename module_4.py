@@ -123,7 +123,7 @@ def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
 
 
 def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, layout_meta: dict) -> dict:
-    """Multi-page table & text parsing engine with strict cell-index mapping and anchor balance matching."""
+    """Multi-page table & text parsing engine with strict cell-index mapping, line-break normalization, and anchor balance matching."""
     ledger = []
 
     # 1. Primary Structured Table Parsing Pass
@@ -179,10 +179,14 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     txn_date = date_match.group(0)
                     desc = str(row[desc_idx]).strip() if desc_idx != -1 and desc_idx < len(row) and row[desc_idx] else ""
 
-                    # Strict Cell Index Fetching (No string fallbacks to avoid Balance shifting into Debit)
-                    debit = _clean_number(row[dr_idx]) if dr_idx != -1 and dr_idx < len(row) and row[dr_idx] else 0.0
-                    credit = _clean_number(row[cr_idx]) if cr_idx != -1 and cr_idx < len(row) and row[cr_idx] else 0.0
-                    balance = _clean_number(row[bal_idx]) if bal_idx != -1 and bal_idx < len(row) and row[bal_idx] else 0.0
+                    # Strict Cell Isolation (Reject text artifacts bleeding into debit/credit columns)
+                    raw_dr = str(row[dr_idx]).strip() if dr_idx != -1 and dr_idx < len(row) and row[dr_idx] else ""
+                    raw_cr = str(row[cr_idx]).strip() if cr_idx != -1 and cr_idx < len(row) and row[cr_idx] else ""
+                    raw_bal = str(row[bal_idx]).strip() if bal_idx != -1 and bal_idx < len(row) and row[bal_idx] else ""
+
+                    debit = _clean_number(raw_dr) if re.search(r"\d", raw_dr) else 0.0
+                    credit = _clean_number(raw_cr) if re.search(r"\d", raw_cr) else 0.0
+                    balance = _clean_number(raw_bal) if re.search(r"\d", raw_bal) else 0.0
 
                     current_entry = {
                         "date": txn_date,
@@ -198,7 +202,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             if current_entry:
                 ledger.append(current_entry)
 
-    # 2. Multi-Page Spatial Line Fallback (Triggers only if Table Engine returns no ledger)
+    # 2. Multi-Page Spatial Line Fallback
     if not ledger:
         for layout in spatial_analysis["layouts"]:
             for line in layout["lines"]:
@@ -228,23 +232,25 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     "running_balance": balance,
                 })
 
-    # Tax Classification Engine
+    # Tax Classification Engine with Normalized String Matching
     final_ledger = []
     for t in ledger:
         if t["debit"] == 0.0 and t["credit"] == 0.0:
             continue
 
-        desc_upper = t["description"].upper()
+        # Replacing newlines with single spaces for unified regex evaluation
+        normalized_desc = " ".join(t["description"].split()).upper()
+        
         category = "General Transfer"
-        if any(term in desc_upper for term in ["INT.PD", "INT CREDIT", "SAVINGS INTEREST", "INTEREST PAID", "INT PROCESS"]):
+        if any(term in normalized_desc for term in ["INT.PD", "INT CREDIT", "SAVINGS INTEREST", "INTEREST PAID", "INT PROCESS", "INTEREST CREDIT"]):
             category = "Savings Interest (Sec 80TTA/80TTB)"
-        elif "FD INT" in desc_upper or "TERM DEPOSIT INT" in desc_upper:
+        elif "FD INT" in normalized_desc or "TERM DEPOSIT INT" in normalized_desc:
             category = "Fixed Deposit Interest"
-        elif "DIVIDEND" in desc_upper or "DIV" in desc_upper:
+        elif "DIVIDEND" in normalized_desc or "DIV" in normalized_desc:
             category = "Dividend Income (Sec 56(2)(i))"
-        elif "SGB" in desc_upper and "INT" in desc_upper:
+        elif "SGB" in normalized_desc and "INT" in normalized_desc:
             category = "SGB Interest Income"
-        elif "REFUND" in desc_upper or "INCOME TAX" in desc_upper:
+        elif "REFUND" in normalized_desc or "INCOME TAX" in normalized_desc:
             category = "Income Tax Refund (Sec 244A)"
 
         final_ledger.append({
@@ -258,7 +264,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             "classified_category": category,
         })
 
-    # Summary Anchor Resolution (Extracts contiguous summary blocks like IDFC Header)
+    # Summary Anchor Resolution
     full_text = spatial_analysis["full_text"]
     
     summary_block = re.search(
