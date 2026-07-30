@@ -47,15 +47,43 @@ def parse_document_content(
         "total_tables_extracted": len(extracted_tables),
     }
 
-    # Deterministic pattern matching per category
     if "BANK" in cat_upper:
+        interest_entries = []
+
+        # 1. Regex text matching
         interest_matches = re.findall(
             r"(?i)(?:interest|int paid|int cr)\D*([\d,]+\.\d{2})", raw_text
         )
-        amounts = [float(m.replace(",", "")) for m in interest_matches]
-        extracted_data["detected_interest_entries"] = amounts
+        for m in interest_matches:
+            try:
+                interest_entries.append(float(m.replace(",", "")))
+            except ValueError:
+                pass
+
+        # 2. Table row inspection for interest narrations
+        for table in extracted_tables:
+            for row in table:
+                if not row:
+                    continue
+                row_str = " ".join([str(cell) for cell in row if cell]).lower()
+                if any(
+                    term in row_str
+                    for term in ["interest", "int cr", "int.pd", "int.cr", "int paid"]
+                ):
+                    for cell in row:
+                        if cell:
+                            clean_val = re.sub(r"[^\d.]", "", str(cell))
+                            if re.match(r"^\d+\.\d{2}$", clean_val):
+                                try:
+                                    val = float(clean_val)
+                                    if val > 0 and val not in interest_entries:
+                                        interest_entries.append(val)
+                                except ValueError:
+                                    pass
+
+        extracted_data["detected_interest_entries"] = interest_entries
         extracted_data["total_interest_detected"] = (
-            sum(amounts) if amounts else 0.0
+            sum(interest_entries) if interest_entries else 0.0
         )
 
     elif "SGB" in cat_upper or "SOVEREIGN GOLD BOND" in cat_upper:
