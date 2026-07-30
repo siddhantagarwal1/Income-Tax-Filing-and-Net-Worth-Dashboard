@@ -121,7 +121,6 @@ def analyze_and_register_layout(doc_type: str, spatial_analysis: dict) -> dict:
         first_meaningful_line = text_lines[0][:30] if text_lines else "GENERIC_DOC"
         signature_kw = [first_meaningful_line]
 
-    # Target primary transaction ledger headers (Strictly bypass non-ledger summary blocks)
     header_keywords = ["date", "particulars", "description", "withdrawal", "deposit", "debit", "credit", "balance"]
     detected_headers = []
     
@@ -167,6 +166,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
     DEBIT_KEYWORDS = ["AUTO DEBIT", "ATD", "BILLPAY", "DEBIT CARD", "SMSCHGS", "CHARGES", "FEE", "WITHDRAWAL"]
     CREDIT_KEYWORDS = ["INT.PD", "INTEREST CREDIT", "INTEREST PAID", "DEPOSIT", "REFUND"]
 
+    # Strict Table Extraction
     for page in pdf.pages:
         tables = page.extract_tables()
         if not tables:
@@ -182,7 +182,6 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             for row_idx, row in enumerate(table):
                 header_candidate = [str(c).lower().strip() if c else "" for c in row]
                 
-                # Filter out summary/account detail headers explicitly
                 if any(any(bad in h for bad in ["nomination", "fixed deposits", "account type", "balance(i)", "balance(i+ii)", "(linked)"]) for h in header_candidate):
                     continue
 
@@ -261,6 +260,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             if current_entry:
                 ledger.append(current_entry)
 
+    # Line Extraction Fallback (Only executed if no structured tables were recognized)
     if not ledger:
         for layout in spatial_analysis["layouts"]:
             for line in layout["lines"]:
@@ -270,7 +270,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                 if any(kw in line_upper for kw in ["B/F", "BROUGHT FORWARD", "OPENING BALANCE", "NOMINATION", "FIXED DEPOSITS", "ACCOUNT TYPE"]):
                     continue
 
-                date_match = re.search(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}-[A-Za-z]{3}-\d{2,4})\b", line_str)
+                date_match = re.search(r"\b(?:\d{2}[/-]\d{2}[/-]\d{4}|\d{2}-[A-Za-z]{3}-\d{4})\b", line_str)
                 if not date_match:
                     continue
 
@@ -304,6 +304,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     "running_balance": balance,
                 })
 
+    # Exact Signature Deduplication
     unique_ledger = []
     seen_transactions = set()
     for item in ledger:
@@ -314,6 +315,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             seen_transactions.add(dedup_key)
             unique_ledger.append(item)
 
+    # Tax Categorization Pass
     final_ledger = []
     for t in unique_ledger:
         if t["debit"] == 0.0 and t["credit"] == 0.0:
