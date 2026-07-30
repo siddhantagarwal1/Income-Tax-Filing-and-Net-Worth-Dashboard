@@ -332,6 +332,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
     total_credits = sum(item["credit"] for item in final_ledger)
     total_debits = sum(item["debit"] for item in final_ledger)
     calc_closing = round(opening_bal - total_debits + total_credits, 2)
+    reconciliation_passed = bool(abs(calc_closing - closing_bal) <= 1.0) if closing_bal > 0 else True
 
     return {
         "layout_matched": layout_meta.get("matched", False),
@@ -342,7 +343,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             "total_debits": round(total_debits, 2),
             "extracted_closing_balance": closing_bal,
             "calculated_closing_balance": calc_closing,
-            "reconciliation_passed": True,
+            "reconciliation_passed": reconciliation_passed,
         },
         "total_interest_detected": sum(t["amount"] for t in final_ledger if "Interest" in t["classified_category"]),
         "interest_transactions": [t for t in final_ledger if "Interest" in t["classified_category"]],
