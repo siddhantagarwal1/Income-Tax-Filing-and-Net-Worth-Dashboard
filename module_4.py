@@ -125,14 +125,12 @@ def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
 
 
 def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, layout_meta: dict) -> dict:
-    """Multi-page table & text parsing engine with strict direction overrides and deduplication."""
+    """Multi-page table & text parsing engine with word-boundary direction rules and deduplication."""
     ledger = []
     STRICT_CURRENCY_REGEX = r"^\d{1,3}(,\d{2,3})*\.\d{2}$|^\d+\.\d{2}$"
 
-    # Keywords that explicitly indicate a Debit transaction
-    DEBIT_KEYWORDS = ["AUTO DEBIT", "ATD", "BILLPAY", "DEBIT CARD", "SMSCHGS", "CHARGES", "FEE", "WITHDRAWAL", "DR"]
-    # Keywords that explicitly indicate a Credit transaction
-    CREDIT_KEYWORDS = ["INT.PD", "INTEREST CREDIT", "INTEREST PAID", "CREDIT CARD ATD REFUND", "DEPOSIT", "REFUND", "CR"]
+    DEBIT_KEYWORDS = ["AUTO DEBIT", "ATD", "BILLPAY", "DEBIT CARD", "SMSCHGS", "CHARGES", "FEE", "WITHDRAWAL"]
+    CREDIT_KEYWORDS = ["INT.PD", "INTEREST CREDIT", "INTEREST PAID", "DEPOSIT", "REFUND"]
 
     # 1. Primary Structured Table Parsing Pass
     for page in pdf.pages:
@@ -179,7 +177,6 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
 
                 row_str = " ".join([str(c) for c in row if c])
                 
-                # Exclude B/F and Opening Balance lines from active transactions
                 if any(kw in row_str.upper() for kw in ["B/F", "BROUGHT FORWARD", "OPENING BALANCE"]):
                     continue
 
@@ -204,7 +201,6 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     credit = _clean_number(raw_cr) if is_cr_valid else 0.0
                     balance = _clean_number(raw_bal) if is_bal_valid else 0.0
 
-                    # Semantic Direction Correction based on transaction description
                     desc_upper = desc.upper()
                     if any(kw in desc_upper for kw in DEBIT_KEYWORDS) and credit > 0 and debit == 0:
                         debit = credit
@@ -232,7 +228,9 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
         for layout in spatial_analysis["layouts"]:
             for line in layout["lines"]:
                 line_str = line["text"]
-                if any(kw in line_str.upper() for kw in ["B/F", "BROUGHT FORWARD", "OPENING BALANCE"]):
+                line_upper = line_str.upper()
+
+                if any(kw in line_upper for kw in ["B/F", "BROUGHT FORWARD", "OPENING BALANCE"]):
                     continue
 
                 date_match = re.search(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}-[A-Za-z]{3}-\d{2,4})\b", line_str)
@@ -248,9 +246,19 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                 balance = num_amounts[-1] if len(num_amounts) >= 1 else 0.0
                 txn_amount = num_amounts[-2] if len(num_amounts) >= 2 else num_amounts[0]
 
-                is_credit = any(k in line_str.upper() for k in CREDIT_KEYWORDS)
-                credit = txn_amount if is_credit else 0.0
-                debit = 0.0 if is_credit else txn_amount
+                # Direction Evaluation prioritizing AUTO DEBIT over generic 'CR' matching
+                is_explicit_debit = any(kw in line_upper for kw in DEBIT_KEYWORDS)
+                is_explicit_credit = any(kw in line_upper for kw in CREDIT_KEYWORDS) or bool(re.search(r"\bCR\b", line_upper))
+
+                if is_explicit_debit:
+                    debit = txn_amount
+                    credit = 0.0
+                elif is_explicit_credit:
+                    credit = txn_amount
+                    debit = 0.0
+                else:
+                    debit = txn_amount
+                    credit = 0.0
 
                 ledger.append({
                     "date": txn_date,
