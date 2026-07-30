@@ -19,17 +19,24 @@ supabase = init_supabase()
 
 
 # --- Deterministic PDF Parser Engine ---
-def parse_document_content(file_bytes: bytes, file_name: str, category: str) -> dict:
-    """Extracts text and key financial line-items using pdfplumber and regex."""
+def parse_document_content(
+    file_bytes: bytes, file_name: str, category: str, password: str = None
+) -> dict:
+    """Extracts text and key financial line-items using pdfplumber and regex with password support."""
     cat_upper = category.upper()
     raw_text = ""
+    extracted_tables = []
 
     try:
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        open_kwargs = {"password": password} if password else {}
+        with pdfplumber.open(io.BytesIO(file_bytes), **open_kwargs) as pdf:
             for page in pdf.pages:
                 text = page.extract_text()
                 if text:
                     raw_text += text + "\n"
+                tables = page.extract_tables()
+                if tables:
+                    extracted_tables.extend(tables)
     except Exception as e:
         return {"error": f"Failed to extract PDF text: {str(e)}", "file_name": file_name}
 
@@ -37,6 +44,7 @@ def parse_document_content(file_bytes: bytes, file_name: str, category: str) -> 
         "file_name": file_name,
         "category": category,
         "raw_text_length": len(raw_text),
+        "total_tables_extracted": len(extracted_tables),
     }
 
     # Deterministic pattern matching per category
@@ -186,10 +194,17 @@ def render_module_4():
                 except Exception:
                     file_bytes = supabase.storage.from_("vault_documents").download(target_doc["file_path"])
 
+                file_password = (
+                    target_doc.get("file_password")
+                    if target_doc.get("is_password_protected")
+                    else None
+                )
+
                 parsed_json = parse_document_content(
                     file_bytes=file_bytes,
                     file_name=target_doc["file_name"],
                     category=target_doc["category"],
+                    password=file_password,
                 )
 
                 payload = {
