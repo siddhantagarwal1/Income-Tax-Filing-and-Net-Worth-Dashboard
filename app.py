@@ -2,6 +2,7 @@ import re
 import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
+from module_2 import render_module_2
 
 # --- Page Configuration ---
 st.set_page_config(page_title="Tax & Wealth OS", layout="wide")
@@ -99,7 +100,10 @@ st.sidebar.markdown('<div class="sidebar-subheader">Modules</div>', unsafe_allow
 
 selected_module = st.sidebar.radio(
     "Select Module",
-    ["Module 1: Basic Profile Details"],
+    [
+        "Module 1: Basic Profile Details",
+        "Module 2: Income Tax Statutory Questionnaire"
+    ],
     label_visibility="collapsed"
 )
 
@@ -220,3 +224,7 @@ if selected_module == "Module 1: Basic Profile Details":
             st.info("No client profiles found.")
     except Exception as e:
         st.error(f"Error fetching profiles: {str(e)}")
+
+# --- Module 2 Render ---
+elif selected_module == "Module 2: Income Tax Statutory Questionnaire":
+    render_module_2()
