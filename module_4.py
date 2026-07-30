@@ -20,7 +20,7 @@ supabase = init_supabase()
 
 # --- Helper Routines ---
 def _clean_number(val) -> float:
-    """Utility to convert text representations of currency into strict floating-point values."""
+    """Converts string representations of amounts to float strictly."""
     if val is None:
         return 0.0
     clean = re.sub(r"[^\d.-]", "", str(val).replace(",", ""))
@@ -31,7 +31,7 @@ def _clean_number(val) -> float:
 
 
 def analyze_pdf_spatial_structure(pdf: pdfplumber.PDF) -> dict:
-    """Performs spatial layout discovery and raw text line extraction."""
+    """Scans all pages for spatial layout coordinates and raw text line clusters."""
     page_layouts = []
     global_text_lines = []
 
@@ -77,11 +77,7 @@ def analyze_pdf_spatial_structure(pdf: pdfplumber.PDF) -> dict:
 
 
 def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
-    """
-    Looks up existing signature keywords in layout_registry.
-    If match found, returns layout_rules.
-    If no match, creates signature, registers in layout_registry, and returns rules.
-    """
+    """Matches or registers document layout metadata in Supabase."""
     try:
         res = supabase.table("layout_registry").select("*").eq("doc_type", doc_type).execute()
         registered_layouts = res.data or []
@@ -93,7 +89,6 @@ def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
     except Exception:
         pass
 
-    # Dynamic Signature Generation
     institution = "GENERIC_PARSER"
     if "IDFC" in raw_text.upper():
         institution = "IDFC_FIRST"
@@ -128,44 +123,63 @@ def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
 
 
 def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, layout_meta: dict) -> dict:
-    """
-    Robust Bank Statement Parser using registered layout rules and multi-pass extraction.
-    """
+    """Multi-page table & text parsing engine with multi-line row stitching."""
     ledger = []
-    
-    # 1. Primary Table Extraction Pass
-    for layout in spatial_analysis["layouts"]:
-        page = pdf.pages[layout["page_num"] - 1]
-        tables = page.extract_tables()
-        
-        if tables:
-            for table in tables:
-                if not table or len(table) < 2:
-                    continue
-                header = [str(c).lower().strip() if c else "" for c in table[0]]
-                
-                date_idx, desc_idx, dr_idx, cr_idx, bal_idx, amt_idx = -1, -1, -1, -1, -1, -1
-                for i, h in enumerate(header):
-                    if any(k in h for k in ["date", "txn date", "value date"]):
-                        date_idx = i
-                    elif any(k in h for k in ["narration", "particular", "description", "details", "remark", "transaction details"]):
-                        desc_idx = i
-                    elif any(k in h for k in ["debit", "withdrawal", "dr", "amount (dr)"]):
-                        dr_idx = i
-                    elif any(k in h for k in ["credit", "deposit", "cr", "amount (cr)"]):
-                        cr_idx = i
-                    elif "balance" in h:
-                        bal_idx = i
-                    elif "amount" in h:
-                        amt_idx = i
 
-                for row in table[1:]:
-                    if not row or all(c is None or str(c).strip() == "" for c in row):
-                        continue
-                    row_str = " ".join([str(c) for c in row if c])
-                    date_match = re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", row_str)
-                    if not date_match:
-                        continue
+    # 1. Multi-Page Table Scanning Pass
+    for page in pdf.pages:
+        tables = page.extract_tables()
+        if not tables:
+            continue
+
+        for table in tables:
+            if not table or len(table) < 2:
+                continue
+
+            # Identify headers dynamically across all extracted tables
+            date_idx, desc_idx, dr_idx, cr_idx, bal_idx, amt_idx = -1, -1, -1, -1, -1, -1
+            header_found = False
+
+            for row_idx, row in enumerate(table):
+                header_candidate = [str(c).lower().strip() if c else "" for c in row]
+                
+                # Check for standard bank ledger column headers
+                if any(any(k in h for k in ["particulars", "description", "narration", "transaction details"]) for h in header_candidate):
+                    header_found = True
+                    for i, h in enumerate(header_candidate):
+                        if any(k in h for k in ["date", "txn date", "value date"]):
+                            if date_idx == -1:
+                                date_idx = i
+                        elif any(k in h for k in ["narration", "particular", "description", "details", "remark", "transaction details"]):
+                            desc_idx = i
+                        elif any(k in h for k in ["debit", "withdrawal", "dr", "amount (dr)"]):
+                            dr_idx = i
+                        elif any(k in h for k in ["credit", "deposit", "cr", "amount (cr)"]):
+                            cr_idx = i
+                        elif "balance" in h:
+                            bal_idx = i
+                        elif "amount" in h:
+                            amt_idx = i
+                    
+                    data_rows = table[row_idx + 1:]
+                    break
+
+            if not header_found:
+                continue
+
+            # Process data rows with multi-line stitching
+            current_entry = None
+
+            for row in data_rows:
+                if not row or all(c is None or str(c).strip() == "" for c in row):
+                    continue
+
+                row_str = " ".join([str(c) for c in row if c])
+                date_match = re.search(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}-[A-Za-z]{3}-\d{2,4})\b", row_str)
+
+                if date_match:
+                    if current_entry:
+                        ledger.append(current_entry)
 
                     txn_date = date_match.group(0)
                     desc = str(row[desc_idx]).strip() if desc_idx != -1 and desc_idx < len(row) and row[desc_idx] else row_str
@@ -181,50 +195,36 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                         else:
                             debit = amt_val
 
-                    if debit == 0.0 and credit == 0.0:
-                        continue
-
-                    category = "General Transfer"
-                    desc_upper = desc.upper()
-                    if any(term in desc_upper for term in ["INT.PD", "INT CREDIT", "SAVINGS INTEREST", "INTEREST PAID", "INT PROCESS"]):
-                        category = "Savings Interest (Sec 80TTA/80TTB)"
-                    elif "FD INT" in desc_upper or "TERM DEPOSIT INT" in desc_upper:
-                        category = "Fixed Deposit Interest"
-                    elif "DIVIDEND" in desc_upper or "DIV" in desc_upper:
-                        category = "Dividend Income (Sec 56(2)(i))"
-                    elif "SGB" in desc_upper and "INT" in desc_upper:
-                        category = "SGB Interest Income"
-                    elif "REFUND" in desc_upper or "INCOME TAX" in desc_upper:
-                        category = "Income Tax Refund (Sec 244A)"
-
-                    ledger.append({
+                    current_entry = {
                         "date": txn_date,
                         "description": desc,
-                        "transaction_type": "Credit" if credit > 0 else "Debit",
-                        "amount": credit if credit > 0 else debit,
                         "debit": debit,
                         "credit": credit,
                         "running_balance": balance,
-                        "classified_category": category,
-                    })
+                    }
+                else:
+                    # Append wrapped multi-line descriptions to existing record
+                    if current_entry and desc_idx != -1 and desc_idx < len(row) and row[desc_idx]:
+                        current_entry["description"] += " " + str(row[desc_idx]).strip()
 
-    # 2. Spatial Text-Line Fallback Pass
+            if current_entry:
+                ledger.append(current_entry)
+
+    # 2. Multi-Page Spatial Line-Text Fallback Pass
     if not ledger:
         for layout in spatial_analysis["layouts"]:
             for line in layout["lines"]:
                 line_str = line["text"]
-                date_match = re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", line_str)
+                date_match = re.search(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}-[A-Za-z]{3}-\d{2,4})\b", line_str)
                 if not date_match:
                     continue
 
                 txn_date = date_match.group(0)
                 amounts = re.findall(r"[\d,]+\.\d{2}", line_str)
-                
                 if not amounts:
                     continue
 
                 num_amounts = [_clean_number(a) for a in amounts]
-                
                 balance = num_amounts[-1] if len(num_amounts) >= 1 else 0.0
                 txn_amount = num_amounts[-2] if len(num_amounts) >= 2 else num_amounts[0]
 
@@ -232,47 +232,58 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                 credit = txn_amount if is_credit else 0.0
                 debit = 0.0 if is_credit else txn_amount
 
-                category = "General Transfer"
-                desc_upper = line_str.upper()
-                if any(term in desc_upper for term in ["INT.PD", "INT CREDIT", "SAVINGS INTEREST", "INTEREST PAID", "INT PROCESS"]):
-                    category = "Savings Interest (Sec 80TTA/80TTB)"
-                elif "FD INT" in desc_upper or "TERM DEPOSIT INT" in desc_upper:
-                    category = "Fixed Deposit Interest"
-                elif "DIVIDEND" in desc_upper or "DIV" in desc_upper:
-                    category = "Dividend Income (Sec 56(2)(i))"
-                elif "SGB" in desc_upper and "INT" in desc_upper:
-                    category = "SGB Interest Income"
-                elif "REFUND" in desc_upper or "INCOME TAX" in desc_upper:
-                    category = "Income Tax Refund (Sec 244A)"
-
                 ledger.append({
                     "date": txn_date,
                     "description": line_str,
-                    "transaction_type": "Credit" if credit > 0 else "Debit",
-                    "amount": credit if credit > 0 else debit,
                     "debit": debit,
                     "credit": credit,
                     "running_balance": balance,
-                    "classified_category": category,
                 })
 
-    # Balance Extraction & Logic Proof
+    # Apply Tax Categorization & Final Field Mapping
+    final_ledger = []
+    for t in ledger:
+        if t["debit"] == 0.0 and t["credit"] == 0.0:
+            continue
+
+        desc_upper = t["description"].upper()
+        category = "General Transfer"
+        if any(term in desc_upper for term in ["INT.PD", "INT CREDIT", "SAVINGS INTEREST", "INTEREST PAID", "INT PROCESS"]):
+            category = "Savings Interest (Sec 80TTA/80TTB)"
+        elif "FD INT" in desc_upper or "TERM DEPOSIT INT" in desc_upper:
+            category = "Fixed Deposit Interest"
+        elif "DIVIDEND" in desc_upper or "DIV" in desc_upper:
+            category = "Dividend Income (Sec 56(2)(i))"
+        elif "SGB" in desc_upper and "INT" in desc_upper:
+            category = "SGB Interest Income"
+        elif "REFUND" in desc_upper or "INCOME TAX" in desc_upper:
+            category = "Income Tax Refund (Sec 244A)"
+
+        final_ledger.append({
+            "date": t["date"],
+            "description": t["description"],
+            "transaction_type": "Credit" if t["credit"] > 0 else "Debit",
+            "amount": t["credit"] if t["credit"] > 0 else t["debit"],
+            "debit": t["debit"],
+            "credit": t["credit"],
+            "running_balance": t["running_balance"],
+            "classified_category": category,
+        })
+
+    # Global Multi-Page Opening/Closing Balance Anchor Resolution
     full_text = spatial_analysis["full_text"]
-    
-    # Check multi-word Opening/Closing balance blocks
     op_match = re.search(r"(?i)(?:opening balance|b/f)\D*([\d,]+\.\d{2})", full_text)
     cl_match = re.search(r"(?i)(?:closing balance|c/f)\D*([\d,]+\.\d{2})", full_text)
 
-    opening_bal = _clean_number(op_match.group(1)) if op_match else (ledger[0]["running_balance"] - ledger[0]["credit"] + ledger[0]["debit"] if ledger else 0.0)
-    closing_bal = _clean_number(cl_match.group(1)) if cl_match else (ledger[-1]["running_balance"] if ledger else 0.0)
+    opening_bal = _clean_number(op_match.group(1)) if op_match else (final_ledger[0]["running_balance"] - final_ledger[0]["credit"] + final_ledger[0]["debit"] if final_ledger else 0.0)
+    closing_bal = _clean_number(cl_match.group(1)) if cl_match else (final_ledger[-1]["running_balance"] if final_ledger else 0.0)
 
-    total_credits = sum(item["credit"] for item in ledger)
-    total_debits = sum(item["debit"] for item in ledger)
+    total_credits = sum(item["credit"] for item in final_ledger)
+    total_debits = sum(item["debit"] for item in final_ledger)
     calc_closing = round(opening_bal - total_debits + total_credits, 2)
-    
-    reconciliation_passed = bool(abs(calc_closing - closing_bal) <= 1.0) if closing_bal > 0 else True
 
-    detected_interest_items = [t for t in ledger if "Interest" in t["classified_category"]]
+    reconciliation_passed = bool(abs(calc_closing - closing_bal) <= 1.0) if closing_bal > 0 else True
+    detected_interest_items = [t for t in final_ledger if "Interest" in t["classified_category"]]
     total_interest_detected = sum(t["amount"] for t in detected_interest_items)
 
     return {
@@ -288,11 +299,12 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
         },
         "total_interest_detected": total_interest_detected,
         "interest_transactions": detected_interest_items,
-        "transaction_ledger": ledger,
+        "transaction_ledger": final_ledger,
     }
 
 
 def parse_ais_tis_spatial(spatial_analysis: dict) -> dict:
+    """Parses multi-page AIS/TIS figures."""
     full_text = spatial_analysis["full_text"]
     tds_matches = re.findall(r"(?i)(?:tds|tax deducted)\D*([\d,]+\.\d{2})", full_text)
     savings_int = re.findall(r"(?i)(?:interest from savings|194a)\D*([\d,]+\.\d{2})", full_text)
@@ -306,6 +318,7 @@ def parse_ais_tis_spatial(spatial_analysis: dict) -> dict:
 
 
 def parse_excel_document(file_bytes: bytes, file_name: str) -> dict:
+    """Parses Excel schedules across all worksheets."""
     try:
         excel_file = pd.ExcelFile(io.BytesIO(file_bytes))
         sheet_summaries = {}
@@ -329,11 +342,12 @@ def parse_excel_document(file_bytes: bytes, file_name: str) -> dict:
 
 
 def parse_sgb_certificate_spatial(spatial_analysis: dict) -> dict:
+    """Parses multi-page SGB certificates."""
     full_text = spatial_analysis["full_text"]
     series = re.search(r"(?i)(?:series|tranche)\D*([A-Z0-9/-]+)", full_text)
     units = re.search(r"(?i)(?:units|quantity)\D*(\d+)", full_text)
     amount = re.search(r"(?i)(?:amount|consideration|issue price)\D*([\d,]+\.\d{2})", full_text)
-    
+
     inv_amount = _clean_number(amount.group(1)) if amount else 0.0
     return {
         "bond_series": series.group(1) if series else "Unknown",
@@ -346,6 +360,7 @@ def parse_sgb_certificate_spatial(spatial_analysis: dict) -> dict:
 def parse_document_content(
     file_bytes: bytes, file_name: str, category: str, password: str = None
 ) -> dict:
+    """Main document router for PDFs and Excel sheets."""
     cat_upper = category.upper()
 
     if file_name.endswith(".xlsx") or file_name.endswith(".xls"):
@@ -414,7 +429,7 @@ def render_module_4():
         """
         <div class="module-header-container">
             <div class="module-title">Module 4: Financial & Tax Data Ingestion Engine</div>
-            <div class="module-subtitle">Layout Signature Registry, Spatial Analysis & Ledger Staging</div>
+            <div class="module-subtitle">Multi-Page Spatial Layout Analysis, Structured Extraction & Ledger Staging</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -490,10 +505,10 @@ def render_module_4():
         st.write("")
         parse_btn = st.button("Parse Document", type="primary", key="m4_parse_btn")
 
-    show_debug = st.checkbox("Enable Layout Debug Inspector", value=True, key="m4_debug_chk")
+    show_debug = st.checkbox("Enable Multi-Page Layout Debug Inspector", value=True, key="m4_debug_chk")
 
     if parse_btn:
-        with st.spinner(f"Running Extraction & Layout Registry Analysis on {target_doc['file_name']}..."):
+        with st.spinner(f"Running Multi-Page Spatial Extraction on {target_doc['file_name']}..."):
             try:
                 try:
                     file_bytes = supabase.storage.from_("client_vault").download(target_doc["file_path"])
@@ -529,28 +544,32 @@ def render_module_4():
 
     st.divider()
 
-    # --- Layout Debug Inspector Output ---
+    # --- Multi-Page Debug Inspector Output ---
     if show_debug:
-        st.markdown("<h4 style='color: #d97706;'>Layout Debug Inspector</h4>", unsafe_allow_html=True)
-        if st.button("Inspect Raw Text & Structural Layout", key="btn_run_inspect"):
+        st.markdown("<h4 style='color: #d97706;'>Multi-Page Layout Debug Inspector</h4>", unsafe_allow_html=True)
+        if st.button("Inspect All Pages Raw Text & Layout Structures", key="btn_run_inspect"):
             try:
                 try:
                     file_bytes = supabase.storage.from_("client_vault").download(target_doc["file_path"])
                 except Exception:
                     file_bytes = supabase.storage.from_("vault_documents").download(target_doc["file_path"])
-                
+
                 open_kwargs = {"password": target_doc.get("file_password")} if target_doc.get("is_password_protected") else {}
                 with pdfplumber.open(io.BytesIO(file_bytes), **open_kwargs) as pdf:
-                    p1_text = pdf.pages[0].extract_text()
-                    p1_tables = pdf.pages[0].extract_tables()
-                    
-                    st.write("**Page 1 Extracted Tables Count:**", len(p1_tables))
-                    if p1_tables:
-                        st.write("**First Table Raw Headers/Rows:**", p1_tables[0][:3])
-                    st.write("**Page 1 Raw Text Lines Preview:**")
-                    st.code(p1_text[:2000] if p1_text else "NO TEXT EXTRACTED FROM PAGE 1")
+                    st.write("**Total Pages in Document:**", len(pdf.pages))
+                    page_summary = []
+                    for idx, page in enumerate(pdf.pages):
+                        p_tables = page.extract_tables()
+                        p_text = page.extract_text()
+                        page_summary.append({
+                            "Page": idx + 1,
+                            "Tables Count": len(p_tables),
+                            "Character Count": len(p_text) if p_text else 0,
+                            "Preview": p_text[:150].replace("\n", " ") if p_text else "EMPTY PAGE"
+                        })
+                    st.dataframe(pd.DataFrame(page_summary))
             except Exception as inspect_err:
-                st.error(f"Debug inspection failed: {str(inspect_err)}")
+                st.error(f"Multi-page inspection failed: {str(inspect_err)}")
 
     st.divider()
 
