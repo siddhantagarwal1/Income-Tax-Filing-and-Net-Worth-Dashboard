@@ -54,7 +54,7 @@ def parse_document_content(file_bytes: bytes, file_name: str, category: str) -> 
 
     try:
         response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-1.5-flash",
             contents=[
                 types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
                 prompt,
