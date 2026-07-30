@@ -164,21 +164,24 @@ def analyze_and_register_layout(doc_type: str, spatial_analysis: dict) -> dict:
 
 
 def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, layout_meta: dict) -> dict:
-    """Multi-page ICICI & standard bank table parser with fallback line-reconstruction."""
+    """Multi-page ICICI & standard bank table parser with page-level fallback isolation."""
     ledger = []
     STRICT_CURRENCY_REGEX = r"^\d{1,3}(,\d{2,3})*\.\d{2}$|^\d+\.\d{2}$"
     DEBIT_KEYWORDS = ["AUTO DEBIT", "ATD", "BILLPAY", "DEBIT CARD", "SMSCHGS", "CHARGES", "FEE", "WITHDRAWAL", "CREDIT CARD ATD"]
     CREDIT_KEYWORDS = ["INT.PD", "INTEREST CREDIT", "INTEREST PAID", "DEPOSIT", "REFUND"]
 
+    pages_with_tables = set()
+
     # Pass 1: Standard Table Extraction
-    for page in pdf.pages:
+    for page_idx, page in enumerate(pdf.pages):
         tables = page.extract_tables()
         if not tables:
             continue
+
         for table in tables:
             if not table or len(table) < 2:
                 continue
-            
+
             date_idx, desc_idx, dr_idx, cr_idx, bal_idx = -1, -1, -1, -1, -1
             header_found = False
 
@@ -186,7 +189,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                 header_candidate = [str(c).lower().strip() if c else "" for c in row]
                 if any(bad in " ".join(header_candidate) for bad in ["nomination", "fixed deposits", "account type", "balance(i)"]):
                     continue
-                
+
                 if any(k in " ".join(header_candidate) for k in ["particulars", "description", "narration", "details"]):
                     header_found = True
                     for i, h in enumerate(header_candidate):
@@ -206,7 +209,9 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             if not header_found:
                 continue
 
+            pages_with_tables.add(page_idx + 1)
             current_entry = None
+
             for row in data_rows:
                 if not row or all(c is None or str(c).strip() == "" for c in row):
                     continue
@@ -244,63 +249,56 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             if current_entry:
                 ledger.append(current_entry)
 
-    # Pass 2: Line Spatial Fallback (Executed if table extraction fails)
-    if not ledger:
-        for layout in spatial_analysis["layouts"]:
-            for line in layout["lines"]:
-                line_str = line["text"]
-                line_upper = line_str.upper()
-                if any(kw in line_upper for kw in ["B/F", "BROUGHT FORWARD", "OPENING BALANCE", "STATEMENT OF ACCOUNT", "PAGE ", "NOMINATION"]):
-                    continue
+    # Pass 2: Spatial Line Fallback (Only run on pages that produced NO structured table rows)
+    for layout in spatial_analysis["layouts"]:
+        if layout["page_num"] in pages_with_tables:
+            continue
 
-                date_match = re.search(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}-[A-Za-z]{3}-\d{2,4})\b", line_str)
-                if not date_match:
-                    continue
+        for line in layout["lines"]:
+            line_str = line["text"]
+            line_upper = line_str.upper()
+            if any(kw in line_upper for kw in ["B/F", "BROUGHT FORWARD", "OPENING BALANCE", "STATEMENT OF ACCOUNT", "PAGE ", "NOMINATION"]):
+                continue
 
-                amounts = re.findall(r"[\d,]+\.\d{2}", line_str)
-                if not amounts:
-                    continue
+            date_match = re.search(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}-[A-Za-z]{3}-\d{2,4})\b", line_str)
+            if not date_match:
+                continue
 
-                num_amounts = [_clean_number(a) for a in amounts]
-                txn_date = date_match.group(0)
-                
-                if len(num_amounts) >= 2:
-                    balance = num_amounts[-1]
-                    txn_amount = num_amounts[-2]
-                else:
-                    balance = 0.0
-                    txn_amount = num_amounts[0]
+            amounts = re.findall(r"[\d,]+\.\d{2}", line_str)
+            if not amounts:
+                continue
 
-                is_debit_explicit = any(kw in line_upper for kw in DEBIT_KEYWORDS)
-                is_credit_explicit = any(kw in line_upper for kw in CREDIT_KEYWORDS) or "CR" in line_upper
+            num_amounts = [_clean_number(a) for a in amounts]
+            txn_date = date_match.group(0)
 
-                if is_debit_explicit:
-                    debit = txn_amount
-                    credit = 0.0
-                elif is_credit_explicit:
-                    credit = txn_amount
-                    debit = 0.0
-                else:
-                    debit = txn_amount
-                    credit = 0.0
+            if len(num_amounts) >= 2:
+                balance = num_amounts[-1]
+                txn_amount = num_amounts[-2]
+            else:
+                balance = 0.0
+                txn_amount = num_amounts[0]
 
-                ledger.append({
-                    "date": txn_date,
-                    "description": line_str,
-                    "debit": debit,
-                    "credit": credit,
-                    "running_balance": balance
-                })
+            is_debit_explicit = any(kw in line_upper for kw in DEBIT_KEYWORDS)
+            is_credit_explicit = any(kw in line_upper for kw in CREDIT_KEYWORDS) or "CR" in line_upper
 
-    # Pass 3: Strict Deduplication & Tax Classification
+            ledger.append({
+                "date": txn_date,
+                "description": line_str,
+                "debit": txn_amount if is_debit_explicit or not is_credit_explicit else 0.0,
+                "credit": txn_amount if is_credit_explicit and not is_debit_explicit else 0.0,
+                "running_balance": balance
+            })
+
+    # Pass 3: Strict Unique Key Deduplication
     unique_ledger = []
     seen = set()
     for item in ledger:
-        key = (item["date"], item["description"], item["debit"], item["credit"], item["running_balance"])
+        key = (item["date"], item["description"].strip(), item["debit"], item["credit"], item["running_balance"])
         if key not in seen:
             seen.add(key)
             unique_ledger.append(item)
 
+    # Pass 4: Tax Classification
     final_ledger = []
     for t in unique_ledger:
         if t["debit"] == 0.0 and t["credit"] == 0.0:
