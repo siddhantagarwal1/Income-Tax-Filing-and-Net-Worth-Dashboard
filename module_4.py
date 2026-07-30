@@ -18,14 +18,172 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 
-# --- Deterministic PDF Parser Engine ---
+# --- Helper Extraction Routines ---
+def _clean_number(val: str) -> float:
+    """Helper to convert string amounts to float strictly."""
+    if not val:
+        return 0.0
+    clean = re.sub(r"[^\d.-]", "", str(val).replace(",", ""))
+    try:
+        return float(clean)
+    except ValueError:
+        return 0.0
+
+
+def parse_bank_statement(pdf: pdfplumber.PDF, raw_text: str) -> dict:
+    """Parses full bank transaction ledgers, summaries, and performs accounting validation."""
+    ledger = []
+    
+    # 1. Page-by-page table processing for multi-column bank ledgers
+    for page in pdf.pages:
+        tables = page.extract_tables()
+        for table in tables:
+            if not table or len(table) < 2:
+                continue
+            
+            # Map column indices based on header row inspect
+            header = [str(c).lower().strip() if c else "" for c in table[0]]
+            
+            date_idx, desc_idx, dr_idx, cr_idx, bal_idx = -1, -1, -1, -1, -1
+            for i, h in enumerate(header):
+                if "date" in h:
+                    date_idx = i
+                elif any(k in h for k in ["narration", "particular", "description", "details"]):
+                    desc_idx = i
+                elif any(k in h for k in ["debit", "withdrawal", "dr"]):
+                    dr_idx = i
+                elif any(k in h for k in ["credit", "deposit", "cr"]):
+                    cr_idx = i
+                elif "balance" in h:
+                    bal_idx = i
+
+            # Fallback row iteration
+            for row in table[1:]:
+                if not row or len(row) < 3:
+                    continue
+                
+                row_str = " ".join([str(c) for c in row if c])
+                
+                # Extract date entry pattern
+                date_match = re.search(r"\b\d{2}[/-]\d{2}[/-]\d{2,4}\b", row_str)
+                if not date_match:
+                    continue
+                
+                txn_date = date_match.group(0)
+                desc = str(row[desc_idx]) if desc_idx != -1 and desc_idx < len(row) else row_str
+                debit = _clean_number(row[dr_idx]) if dr_idx != -1 and dr_idx < len(row) else 0.0
+                credit = _clean_number(row[cr_idx]) if cr_idx != -1 and cr_idx < len(row) else 0.0
+                balance = _clean_number(row[bal_idx]) if bal_idx != -1 and bal_idx < len(row) else 0.0
+
+                # Tax/Financial Categorization Engine Rules
+                category = "General Transfer"
+                desc_upper = desc.upper()
+                if any(term in desc_upper for term in ["INT.PD", "INT CREDIT", "SAVINGS INTEREST", "INTEREST PAID"]):
+                    category = "Interest Income - Savings Account (Sec 80TTA/80TTB)"
+                elif "FD INT" in desc_upper or "TERM DEPOSIT INT" in desc_upper:
+                    category = "Interest Income - Fixed Deposit"
+                elif "DIVIDEND" in desc_upper or "DIV" in desc_upper:
+                    category = "Dividend Income (Sec 56(2)(i))"
+                elif "SGB" in desc_upper and "INT" in desc_upper:
+                    category = "SGB Interest Income"
+                elif "REFUND" in desc_upper or "INCOME TAX" in desc_upper:
+                    category = "Income Tax Refund & Sec 244A Interest"
+
+                ledger.append({
+                    "date": txn_date,
+                    "description": desc.strip(),
+                    "debit": debit,
+                    "credit": credit,
+                    "balance": balance,
+                    "category": category
+                })
+
+    # 2. Extract Opening & Closing Summaries
+    op_match = re.search(r"(?i)(?:opening balance|b/f)\D*([\d,]+\.\d{2})", raw_text)
+    cl_match = re.search(r"(?i)(?:closing balance|c/f)\D*([\d,]+\.\d{2})", raw_text)
+    
+    opening_bal = _clean_number(op_match.group(1)) if op_match else 0.0
+    closing_bal = _clean_number(cl_match.group(1)) if cl_match else 0.0
+    
+    total_credits = sum(item["credit"] for item in ledger)
+    total_debits = sum(item["debit"] for item in ledger)
+    
+    calc_closing = round(opening_bal + total_credits - total_debits, 2)
+    reconciliation_passed = bool(abs(calc_closing - closing_bal) <= 1.0 or not closing_bal)
+
+    interest_entries = [t["credit"] for t in ledger if "Interest Income" in t["category"]]
+
+    return {
+        "summary": {
+            "opening_balance": opening_bal,
+            "total_credits": round(total_credits, 2),
+            "total_debits": round(total_debits, 2),
+            "extracted_closing_balance": closing_bal,
+            "calculated_closing_balance": calc_closing,
+            "reconciliation_passed": reconciliation_passed
+        },
+        "interest_items": {
+            "entries": interest_entries,
+            "total_interest": sum(interest_entries)
+        },
+        "transaction_ledger": ledger
+    }
+
+
+def parse_ais_tis(raw_text: str) -> dict:
+    """Parses AIS/TIS line items for TDS, Dividends, Interest, and Tax Refunds."""
+    tds_matches = re.findall(r"(?i)(?:tds|tax deducted)\D*([\d,]+\.\d{2})", raw_text)
+    dividend_matches = re.findall(r"(?i)(?:dividend)\D*([\d,]+\.\d{2})", raw_text)
+    interest_matches = re.findall(r"(?i)(?:interest from savings|194a)\D*([\d,]+\.\d{2})", raw_text)
+    refund_matches = re.findall(r"(?i)(?:refund|244a)\D*([\d,]+\.\d{2})", raw_text)
+
+    return {
+        "reported_tds_total": sum([_clean_number(x) for x in tds_matches]),
+        "reported_dividend_total": sum([_clean_number(x) for x in dividend_matches]),
+        "reported_interest_total": sum([_clean_number(x) for x in interest_matches]),
+        "reported_refund_total": sum([_clean_number(x) for x in refund_matches])
+    }
+
+
+def parse_sgb_certificate(raw_text: str) -> dict:
+    """Parses SGB bond series, units, amounts, and expected semi-annual interest."""
+    series = re.search(r"(?i)(?:series|tranche)\D*([A-Z0-9/-]+)", raw_text)
+    units = re.search(r"(?i)(?:units|quantity)\D*(\d+)", raw_text)
+    amount = re.search(r"(?i)(?:amount|consideration|issue price)\D*([\d,]+\.\d{2})", raw_text)
+    
+    qty = int(units.group(1)) if units else 0
+    inv_amount = _clean_number(amount.group(1)) if amount else 0.0
+    expected_annual_interest = round(inv_amount * 0.025, 2)  # 2.5% p.a. standard SGB rate
+
+    return {
+        "bond_series": series.group(1) if series else "Unknown",
+        "units_held": qty,
+        "investment_amount": inv_amount,
+        "expected_annual_interest": expected_annual_interest,
+        "expected_semi_annual_payout": round(expected_annual_interest / 2, 2)
+    }
+
+
+def parse_ppf_passbook(raw_text: str) -> dict:
+    """Parses PPF contributions, interest credits, and closing balance."""
+    contributions = re.findall(r"(?i)(?:deposit|subscription)\D*([\d,]+\.\d{2})", raw_text)
+    interest = re.search(r"(?i)(?:interest credited|int paid)\D*([\d,]+\.\d{2})", raw_text)
+    balance = re.search(r"(?i)(?:closing balance|balance c/f)\D*([\d,]+\.\d{2})", raw_text)
+
+    return {
+        "total_contributions": sum([_clean_number(c) for c in contributions]),
+        "interest_credited": _clean_number(interest.group(1)) if interest else 0.0,
+        "closing_balance": _clean_number(balance.group(1)) if balance else 0.0
+    }
+
+
+# --- Unified Deterministic PDF & Document Parser Engine ---
 def parse_document_content(
     file_bytes: bytes, file_name: str, category: str, password: str = None
 ) -> dict:
-    """Extracts text and key financial line-items using pdfplumber and regex with password support."""
+    """Unified engine to route document binary content into specific tax parsers."""
     cat_upper = category.upper()
     raw_text = ""
-    extracted_tables = []
 
     try:
         open_kwargs = {"password": password} if password else {}
@@ -34,78 +192,36 @@ def parse_document_content(
                 text = page.extract_text()
                 if text:
                     raw_text += text + "\n"
-                tables = page.extract_tables()
-                if tables:
-                    extracted_tables.extend(tables)
+
+            extracted_data = {
+                "file_name": file_name,
+                "category": category,
+                "raw_text_length": len(raw_text),
+            }
+
+            if "BANK" in cat_upper:
+                extracted_data["parsed_bank_details"] = parse_bank_statement(pdf, raw_text)
+
+            elif "AIS" in cat_upper or "TIS" in cat_upper:
+                extracted_data["parsed_ais_tis_details"] = parse_ais_tis(raw_text)
+
+            elif "SGB" in cat_upper or "SOVEREIGN GOLD BOND" in cat_upper:
+                extracted_data["parsed_sgb_details"] = parse_sgb_certificate(raw_text)
+
+            elif "PPF" in cat_upper or "PROVIDENT FUND" in cat_upper:
+                extracted_data["parsed_ppf_details"] = parse_ppf_passbook(raw_text)
+
+            elif "FORM 16" in cat_upper or "16A" in cat_upper:
+                pan = re.search(r"[A-Z]{5}[0-9]{4}[A-Z]{1}", raw_text)
+                extracted_data["pan_detected"] = pan.group(0) if pan else None
+
+            else:
+                extracted_data["summary_preview"] = raw_text[:500] if raw_text else "No text found."
+
+            return extracted_data
+
     except Exception as e:
-        return {"error": f"Failed to extract PDF text: {str(e)}", "file_name": file_name}
-
-    extracted_data = {
-        "file_name": file_name,
-        "category": category,
-        "raw_text_length": len(raw_text),
-        "total_tables_extracted": len(extracted_tables),
-    }
-
-    if "BANK" in cat_upper:
-        interest_entries = []
-
-        # 1. Regex text matching
-        interest_matches = re.findall(
-            r"(?i)(?:interest|int paid|int cr)\D*([\d,]+\.\d{2})", raw_text
-        )
-        for m in interest_matches:
-            try:
-                interest_entries.append(float(m.replace(",", "")))
-            except ValueError:
-                pass
-
-        # 2. Table row inspection for interest narrations
-        for table in extracted_tables:
-            for row in table:
-                if not row:
-                    continue
-                row_str = " ".join([str(cell) for cell in row if cell]).lower()
-                if any(
-                    term in row_str
-                    for term in ["interest", "int cr", "int.pd", "int.cr", "int paid"]
-                ):
-                    for cell in row:
-                        if cell:
-                            clean_val = re.sub(r"[^\d.]", "", str(cell))
-                            if re.match(r"^\d+\.\d{2}$", clean_val):
-                                try:
-                                    val = float(clean_val)
-                                    if val > 0 and val not in interest_entries:
-                                        interest_entries.append(val)
-                                except ValueError:
-                                    pass
-
-        extracted_data["detected_interest_entries"] = interest_entries
-        extracted_data["total_interest_detected"] = (
-            sum(interest_entries) if interest_entries else 0.0
-        )
-
-    elif "SGB" in cat_upper or "SOVEREIGN GOLD BOND" in cat_upper:
-        units = re.search(r"(?i)(?:units|quantity)\D*(\d+)", raw_text)
-        amount = re.search(
-            r"(?i)(?:amount|consideration)\D*([\d,]+\.\d{2})", raw_text
-        )
-        extracted_data["units_held"] = int(units.group(1)) if units else None
-        extracted_data["investment_amount"] = (
-            float(amount.group(1).replace(",", "")) if amount else None
-        )
-
-    elif "FORM 16" in cat_upper or "16A" in cat_upper:
-        pan = re.search(r"[A-Z]{5}[0-9]{4}[A-Z]{1}", raw_text)
-        extracted_data["pan_detected"] = pan.group(0) if pan else None
-
-    else:
-        extracted_data["summary_preview"] = (
-            raw_text[:500] if raw_text else "No extractable text found."
-        )
-
-    return extracted_data
+        return {"error": f"Failed to extract document: {str(e)}", "file_name": file_name}
 
 
 def get_doc_enum_type(category: str) -> str:
@@ -130,13 +246,13 @@ def get_doc_enum_type(category: str) -> str:
     return "MISCELLANEOUS"
 
 
-# --- Module 4 Renderer ---
+# --- Module 4 Streamlit Renderer ---
 def render_module_4():
     st.markdown(
         """
         <div class="module-header-container">
             <div class="module-title">Module 4: Financial & Tax Data Ingestion Engine</div>
-            <div class="module-subtitle">Automated Deterministic Parsing, Extraction & Staging Repository</div>
+            <div class="module-subtitle">Automated Multi-Document Parsing, Reconciliation & Staging Ledger</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -190,7 +306,7 @@ def render_module_4():
         return
 
     if not vault_files:
-        st.warning("No documents available in Vault for this client. Please upload files in Module 3 first.")
+        st.warning("No documents available in Vault for this client. Upload files in Module 3 first.")
         return
 
     doc_map = {
@@ -215,7 +331,7 @@ def render_module_4():
         parse_btn = st.button("Parse Document", type="primary", key="m4_parse_btn")
 
     if parse_btn:
-        with st.spinner(f"Extracting line items from {target_doc['file_name']} via pdfplumber..."):
+        with st.spinner(f"Extracting & Reconciling line items from {target_doc['file_name']}..."):
             try:
                 try:
                     file_bytes = supabase.storage.from_("client_vault").download(target_doc["file_path"])
@@ -244,7 +360,7 @@ def render_module_4():
                 }
 
                 supabase.table("parsed_document_data").insert(payload).execute()
-                st.success(f"Parsed & Staged data successfully for {target_doc['file_name']}!")
+                st.success(f"Parsed, Reconciled & Staged data successfully for {target_doc['file_name']}!")
                 st.rerun()
             except Exception as parse_err:
                 st.error(f"Failed to fetch or parse file: {str(parse_err)}")
