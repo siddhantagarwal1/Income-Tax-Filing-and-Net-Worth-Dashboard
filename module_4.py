@@ -87,11 +87,17 @@ def analyze_and_register_layout(doc_type: str, spatial_analysis: dict) -> dict:
 
         for reg in registered_layouts:
             keywords = reg.get("signature_keywords", [])
+            # Skip invalid/corrupted registry rules that matched account summary headers instead of transaction tables
+            rules = reg.get("layout_rules", {})
+            header_kws = rules.get("header_keywords", [])
+            if any(bad in [h.upper() for h in header_kws] for bad in ["BALANCE(I)", "NOMINATION", "ACCOUNT TYPE"]):
+                continue
+
             if keywords and all(kw.upper() in raw_upper for kw in keywords):
                 return {
                     "matched": True,
                     "institution": reg["institution_identifier"],
-                    "rules": reg["layout_rules"],
+                    "rules": rules,
                     "signature_keywords": keywords,
                     "source": "REGISTRY_MATCH"
                 }
@@ -121,14 +127,15 @@ def analyze_and_register_layout(doc_type: str, spatial_analysis: dict) -> dict:
         first_meaningful_line = text_lines[0][:30] if text_lines else "GENERIC_DOC"
         signature_kw = [first_meaningful_line]
 
+    # Target primary transaction ledger headers exclusively
     header_keywords = ["date", "particulars", "description", "withdrawal", "deposit", "debit", "credit", "balance"]
     detected_headers = []
     
     for line in full_text.split("\n"):
         line_low = line.lower()
-        if any(bad_kw in line_low for bad_kw in ["nomination", "fixed deposits", "account type", "balance(i)", "balance(i+ii)", "(linked)"]):
+        if any(bad_kw in line_low for bad_kw in ["nomination", "fixed deposits", "account type", "balance(i)", "balance(i+ii)", "(linked)", "total balance"]):
             continue
-        if any(h in line_low for h in header_keywords):
+        if any(h in line_low for h in ["particulars", "description", "narration", "transaction details"]) and any(h in line_low for h in ["date", "value date"]):
             detected_headers = [w.strip() for w in line.split() if len(w.strip()) > 1]
             break
 
@@ -166,7 +173,6 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
     DEBIT_KEYWORDS = ["AUTO DEBIT", "ATD", "BILLPAY", "DEBIT CARD", "SMSCHGS", "CHARGES", "FEE", "WITHDRAWAL"]
     CREDIT_KEYWORDS = ["INT.PD", "INTEREST CREDIT", "INTEREST PAID", "DEPOSIT", "REFUND"]
 
-    # 1. Primary Structured Table Parsing Pass
     for page in pdf.pages:
         tables = page.extract_tables()
         if not tables:
@@ -182,7 +188,6 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             for row_idx, row in enumerate(table):
                 header_candidate = [str(c).lower().strip() if c else "" for c in row]
                 
-                # Exclude account details / summary headers
                 if any(any(bad in h for bad in ["nomination", "fixed deposits", "account type", "balance(i)", "balance(i+ii)", "(linked)"]) for h in header_candidate):
                     continue
 
@@ -261,7 +266,6 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             if current_entry:
                 ledger.append(current_entry)
 
-    # 2. Strict Spatial Deduplication & Filtering Pass
     unique_ledger = []
     seen_transactions = set()
     for item in ledger:
@@ -272,7 +276,6 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             seen_transactions.add(dedup_key)
             unique_ledger.append(item)
 
-    # 3. Income Tax Act Classification Pass
     final_ledger = []
     for t in unique_ledger:
         if t["debit"] == 0.0 and t["credit"] == 0.0:
