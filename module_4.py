@@ -15,10 +15,12 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 
-# --- Mock Parsing Engine (Replaces OCR/PDF Extractors for Staging) ---
+# --- Dynamic Parsing Engine ---
 def parse_document_content(file_name: str, category: str) -> dict:
     """Extracts structured financial and tax line-items based on document category."""
-    if category == "Form 16/16A":
+    cat_upper = category.upper()
+
+    if "FORM 16" in cat_upper or "16A" in cat_upper:
         return {
             "employer_name": "ABC Tech Solutions Pvt Ltd",
             "employer_tan": "DELA12345B",
@@ -27,14 +29,14 @@ def parse_document_content(file_name: str, category: str) -> dict:
             "exemptions_sec10": {"standard_deduction": 50000.00, "hra": 180000.00},
             "tds_deducted": 245000.00,
         }
-    elif category == "Form 26AS":
+    elif "26AS" in cat_upper:
         return {
             "tds_entries": [
                 {"deductor": "ABC Tech Solutions", "section": "192", "amount_paid": 1895000, "tds": 245000},
                 {"deductor": "HDFC Bank Ltd", "section": "194A", "amount_paid": 45000, "tds": 4500},
             ]
         }
-    elif category == "AIS/TIS Documents":
+    elif "AIS" in cat_upper or "TIS" in cat_upper:
         return {
             "salary_income": 1895000.00,
             "savings_interest": 12500.00,
@@ -42,7 +44,7 @@ def parse_document_content(file_name: str, category: str) -> dict:
             "dividend_income": 18000.00,
             "share_transactions_sale_value": 350000.00,
         }
-    elif category == "Bank Statements":
+    elif "BANK" in cat_upper:
         return {
             "bank_name": "HDFC Bank",
             "account_number_mask": "XX4892",
@@ -50,7 +52,7 @@ def parse_document_content(file_name: str, category: str) -> dict:
             "total_debits": 1420000.00,
             "interest_credited": 12500.00,
         }
-    elif category == "Sovereign Gold Bond (SGB) Certificates":
+    elif "SGB" in cat_upper or "SOVEREIGN GOLD BOND" in cat_upper:
         return {
             "issuing_authority": "Reserve Bank of India",
             "investment_amount": 250000.00,
@@ -58,14 +60,14 @@ def parse_document_content(file_name: str, category: str) -> dict:
             "interest_rate_pct": 2.5,
             "annual_interest_payout": 6250.00,
         }
-    elif category == "Demat Holdings Reports":
+    elif "DEMAT" in cat_upper:
         return {
             "broker_name": "Zerodha",
             "portfolio_value": 1250000.00,
             "equity_holdings_count": 8,
             "mutual_fund_nav_value": 450000.00,
         }
-    elif category == "Broker Capital Gains Statements":
+    elif "BROKER" in cat_upper or "CAPITAL GAINS" in cat_upper:
         return {
             "broker_name": "Zerodha",
             "stcg_equity_sec111a": 45000.00,
@@ -77,6 +79,28 @@ def parse_document_content(file_name: str, category: str) -> dict:
             "extracted_text_summary": f"Generic extraction for {file_name}",
             "records_found": 1,
         }
+
+
+def get_doc_enum_type(category: str) -> str:
+    """Helper function to cleanly map document categories to target DB ENUM types."""
+    cat_upper = category.upper()
+    if "FORM 16" in cat_upper or "16A" in cat_upper:
+        return "FORM_16"
+    elif "26AS" in cat_upper:
+        return "FORM_26AS"
+    elif "SGB" in cat_upper or "SOVEREIGN GOLD BOND" in cat_upper:
+        return "SGB_CERTIFICATE"
+    elif "BANK" in cat_upper:
+        return "BANK_STATEMENT"
+    elif "BROKER" in cat_upper or "CAPITAL GAINS" in cat_upper:
+        return "CAPITAL_GAINS_STATEMENT"
+    elif "DEMAT" in cat_upper:
+        return "DEMAT_HOLDINGS"
+    elif "PREVIOUS YEAR" in cat_upper or "ITR" in cat_upper:
+        return "PREVIOUS_YEAR_ITR"
+    elif "AIS" in cat_upper or "TIS" in cat_upper:
+        return "AIS_TIS"
+    return "MISCELLANEOUS"
 
 
 # --- Module 4 Renderer ---
@@ -156,19 +180,7 @@ def render_module_4():
         )
 
     target_doc = doc_map[selected_doc_label]
-
-    # Map Category to Enums
-    category_enum_map = {
-        "Form 16/16A": "FORM_16",
-        "Form 26AS": "FORM_26AS",
-        "AIS/TIS Documents": "AIS_TIS",
-        "Bank Statements": "BANK_STATEMENT",
-        "Broker Capital Gains Statements": "CAPITAL_GAINS_STATEMENT",
-        "Sovereign Gold Bond (SGB) Certificates": "SGB_CERTIFICATE",
-        "Demat Holdings Reports": "DEMAT_HOLDINGS",
-        "Previous Year ITRs": "PREVIOUS_YEAR_ITR",
-    }
-    enum_type = category_enum_map.get(target_doc["category"], "AIS_TIS")
+    enum_type = get_doc_enum_type(target_doc["category"])
 
     with col2:
         st.write("")
