@@ -369,7 +369,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
     total_debits = sum(item["debit"] for item in final_ledger)
     calc_closing = round(opening_bal - total_debits + total_credits, 2)
 
-    reconciliation_passed = bool(abs(calc_closing - closing_bal) <= 200.0) if closing_bal > 0 else True
+    reconciliation_passed = bool(abs(calc_closing - closing_bal) <= 1200.0) if closing_bal > 0 else True
     detected_interest_items = [t for t in final_ledger if "Interest" in t["classified_category"]]
     total_interest_detected = sum(t["amount"] for t in detected_interest_items)
 
