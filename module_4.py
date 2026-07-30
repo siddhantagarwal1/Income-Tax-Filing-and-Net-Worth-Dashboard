@@ -78,25 +78,27 @@ def analyze_pdf_spatial_structure(pdf: pdfplumber.PDF) -> dict:
 
 def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
     """Matches or registers document layout metadata in Supabase."""
+    raw_upper = raw_text.upper()
+
     try:
         res = supabase.table("layout_registry").select("*").eq("doc_type", doc_type).execute()
         registered_layouts = res.data or []
 
         for reg in registered_layouts:
             keywords = reg.get("signature_keywords", [])
-            if keywords and all(kw.upper() in raw_text.upper() for kw in keywords):
+            if keywords and all(kw.upper() in raw_upper for kw in keywords):
                 return {"matched": True, "institution": reg["institution_identifier"], "rules": reg["layout_rules"]}
     except Exception:
         pass
 
     institution = "GENERIC_PARSER"
-    if "IDFC" in raw_text.upper():
-        institution = "IDFC_FIRST"
-        signature_kw = ["IDFC", "STATEMENT OF ACCOUNT", "Particulars"]
-    elif "ICICI" in raw_text.upper():
+    if "ICICI" in raw_upper:
         institution = "ICICI_BANK"
         signature_kw = ["ICICI", "STATEMENT OF ACCOUNT"]
-    elif "ANNUAL INFORMATION STATEMENT" in raw_text.upper() or "AIS" in raw_text.upper():
+    elif "IDFC" in raw_upper:
+        institution = "IDFC_FIRST"
+        signature_kw = ["IDFC", "STATEMENT OF ACCOUNT", "Particulars"]
+    elif "ANNUAL INFORMATION STATEMENT" in raw_upper or "AIS" in raw_upper:
         institution = "INCOME_TAX_AIS"
         signature_kw = ["ANNUAL INFORMATION STATEMENT", "TAX DEDUCTED"]
     else:
@@ -123,10 +125,8 @@ def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
 
 
 def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, layout_meta: dict) -> dict:
-    """Multi-page table & text parsing engine with strict mandatory currency decimal validation."""
+    """Multi-page table & text parsing engine with strict B/F anchor filtering and deduplication."""
     ledger = []
-
-    # Strict regex pattern requiring two decimal digits (.XX) for bank amounts
     STRICT_CURRENCY_REGEX = r"^\d{1,3}(,\d{2,3})*\.\d{2}$|^\d+\.\d{2}$"
 
     # 1. Primary Structured Table Parsing Pass
@@ -145,7 +145,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             for row_idx, row in enumerate(table):
                 header_candidate = [str(c).lower().strip() if c else "" for c in row]
                 
-                if any(any(k in h for k in ["particulars", "description", "narration", "transaction details"]) for h in header_candidate):
+                if any(any(k in h for k in ["particulars", "description", "narration", "transaction details", "remarks"]) for h in header_candidate):
                     header_found = True
                     for i, h in enumerate(header_candidate):
                         if any(k in h for k in ["txn date", "transaction date", "date", "value date"]):
@@ -153,9 +153,9 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                                 date_idx = i
                         elif any(k in h for k in ["narration", "particular", "description", "details", "remark", "transaction details"]):
                             desc_idx = i
-                        elif any(k in h for k in ["debit", "withdrawal", "dr"]):
+                        elif any(k in h for k in ["withdrawal", "debit", "dr"]):
                             dr_idx = i
-                        elif any(k in h for k in ["credit", "deposit", "cr"]):
+                        elif any(k in h for k in ["deposit", "credit", "cr"]):
                             cr_idx = i
                         elif "balance" in h:
                             bal_idx = i
@@ -173,6 +173,11 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     continue
 
                 row_str = " ".join([str(c) for c in row if c])
+                
+                # Exclude B/F and Opening Balance lines from active transactions
+                if any(kw in row_str.upper() for kw in ["B/F", "BROUGHT FORWARD", "OPENING BALANCE"]):
+                    continue
+
                 date_match = re.search(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}-[A-Za-z]{3}-\d{2,4})\b", row_str)
 
                 if date_match:
@@ -186,7 +191,6 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     raw_cr = str(row[cr_idx]).strip() if cr_idx != -1 and cr_idx < len(row) and row[cr_idx] else ""
                     raw_bal = str(row[bal_idx]).strip() if bal_idx != -1 and bal_idx < len(row) and row[bal_idx] else ""
 
-                    # Reject non-currency strings (e.g. tracking IDs like '1838953') missing mandatory .XX decimals
                     is_dr_valid = bool(re.match(STRICT_CURRENCY_REGEX, raw_dr))
                     is_cr_valid = bool(re.match(STRICT_CURRENCY_REGEX, raw_cr))
                     is_bal_valid = bool(re.match(STRICT_CURRENCY_REGEX, raw_bal))
@@ -214,6 +218,9 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
         for layout in spatial_analysis["layouts"]:
             for line in layout["lines"]:
                 line_str = line["text"]
+                if any(kw in line_str.upper() for kw in ["B/F", "BROUGHT FORWARD", "OPENING BALANCE"]):
+                    continue
+
                 date_match = re.search(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}-[A-Za-z]{3}-\d{2,4})\b", line_str)
                 if not date_match:
                     continue
@@ -239,9 +246,18 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     "running_balance": balance,
                 })
 
+    # 3. Deduplication Pass across Multi-Page Boundaries
+    unique_ledger = []
+    seen_rows = set()
+    for item in ledger:
+        row_key = (item["date"], item["description"], item["debit"], item["credit"], item["running_balance"])
+        if row_key not in seen_rows:
+            seen_rows.add(row_key)
+            unique_ledger.append(item)
+
     # Tax Classification Engine with Normalized Whitespace
     final_ledger = []
-    for t in ledger:
+    for t in unique_ledger:
         if t["debit"] == 0.0 and t["credit"] == 0.0:
             continue
 
