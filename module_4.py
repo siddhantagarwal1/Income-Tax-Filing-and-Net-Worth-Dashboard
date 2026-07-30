@@ -125,9 +125,14 @@ def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
 
 
 def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, layout_meta: dict) -> dict:
-    """Multi-page table & text parsing engine with strict B/F anchor filtering and deduplication."""
+    """Multi-page table & text parsing engine with strict direction overrides and deduplication."""
     ledger = []
     STRICT_CURRENCY_REGEX = r"^\d{1,3}(,\d{2,3})*\.\d{2}$|^\d+\.\d{2}$"
+
+    # Keywords that explicitly indicate a Debit transaction
+    DEBIT_KEYWORDS = ["AUTO DEBIT", "ATD", "BILLPAY", "DEBIT CARD", "SMSCHGS", "CHARGES", "FEE", "WITHDRAWAL", "DR"]
+    # Keywords that explicitly indicate a Credit transaction
+    CREDIT_KEYWORDS = ["INT.PD", "INTEREST CREDIT", "INTEREST PAID", "CREDIT CARD ATD REFUND", "DEPOSIT", "REFUND", "CR"]
 
     # 1. Primary Structured Table Parsing Pass
     for page in pdf.pages:
@@ -199,6 +204,15 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     credit = _clean_number(raw_cr) if is_cr_valid else 0.0
                     balance = _clean_number(raw_bal) if is_bal_valid else 0.0
 
+                    # Semantic Direction Correction based on transaction description
+                    desc_upper = desc.upper()
+                    if any(kw in desc_upper for kw in DEBIT_KEYWORDS) and credit > 0 and debit == 0:
+                        debit = credit
+                        credit = 0.0
+                    elif any(kw in desc_upper for kw in CREDIT_KEYWORDS) and debit > 0 and credit == 0:
+                        credit = debit
+                        debit = 0.0
+
                     current_entry = {
                         "date": txn_date,
                         "description": desc,
@@ -234,7 +248,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                 balance = num_amounts[-1] if len(num_amounts) >= 1 else 0.0
                 txn_amount = num_amounts[-2] if len(num_amounts) >= 2 else num_amounts[0]
 
-                is_credit = any(k in line_str.upper() for k in ["CR", "CREDIT", "DEPOSIT", "INT", "REFUND"])
+                is_credit = any(k in line_str.upper() for k in CREDIT_KEYWORDS)
                 credit = txn_amount if is_credit else 0.0
                 debit = 0.0 if is_credit else txn_amount
 
