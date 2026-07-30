@@ -181,8 +181,11 @@ def render_module_4():
     if parse_btn:
         with st.spinner(f"Extracting line items from {target_doc['file_name']} via pdfplumber..."):
             try:
-                try:     file_bytes = supabase.storage.from_("client_vault").download(target_doc["file_path"]) except Exception:     file_bytes = supabase.storage.from_("vault_documents").download(target_doc["file_path"])
-                
+                try:
+                    file_bytes = supabase.storage.from_("client_vault").download(target_doc["file_path"])
+                except Exception:
+                    file_bytes = supabase.storage.from_("vault_documents").download(target_doc["file_path"])
+
                 parsed_json = parse_document_content(
                     file_bytes=file_bytes,
                     file_name=target_doc["file_name"],
