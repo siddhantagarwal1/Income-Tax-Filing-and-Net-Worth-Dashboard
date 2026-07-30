@@ -5,3 +5,4 @@ openpyxl
 plotly
 pdfplumber
 pypdf
+google-genai
