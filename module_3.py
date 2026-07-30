@@ -46,7 +46,7 @@ def render_module_3():
 
     st.divider()
 
-    # 2. Upload Form with Password Protection Option
+    # 2. Upload Section (Reactive Container without st.form)
     st.markdown("<h3 style='color: #1e3a8a; margin-bottom: 16px;'>Upload Document</h3>", unsafe_allow_html=True)
 
     category_options = [
@@ -61,18 +61,27 @@ def render_module_3():
         "Miscellaneous Documents",
     ]
 
-    with st.form("document_upload_form", clear_on_submit=True):
-        col1, col2 = st.columns(2)
+    col1, col2 = st.columns(2)
 
-        with col1:
-            selected_category = st.selectbox("Document Category*", category_options)
-            uploaded_file = st.file_uploader("Choose File*", type=["pdf", "csv", "xlsx", "xls", "png", "jpg", "jpeg", "json"])
+    with col1:
+        selected_category = st.selectbox("Document Category*", category_options, key="vault_cat_select")
+        uploaded_file = st.file_uploader(
+            "Choose File*", 
+            type=["pdf", "csv", "xlsx", "xls", "png", "jpg", "jpeg", "json"],
+            key="vault_file_uploader"
+        )
 
-        with col2:
-            is_protected = st.checkbox("Is this file password protected?", value=False)
-            file_password = st.text_input("File Password", type="password", disabled=not is_protected, help="Required if file is password protected.")
+    with col2:
+        is_protected = st.checkbox("Is this file password protected?", value=False, key="vault_pwd_check")
+        file_password = st.text_input(
+            "File Password", 
+            type="password", 
+            disabled=not is_protected, 
+            help="Required if file is password protected.",
+            key="vault_pwd_input"
+        )
 
-        upload_submitted = st.form_submit_button("Upload to Vault")
+    upload_submitted = st.button("Upload to Vault", type="primary", key="vault_upload_btn")
 
     if upload_submitted:
         if uploaded_file is None:
@@ -125,7 +134,6 @@ def render_module_3():
         docs = docs_res.data
 
         if docs:
-            # Prepare Data Frame for Concise Table Display
             table_data = []
             for doc in docs:
                 size_kb = f"{round((doc['file_size_bytes'] or 0) / 1024, 2)} KB"
@@ -165,9 +173,9 @@ def render_module_3():
                 )
 
             with col_del_btn:
-                st.write("")  # Spacing
-                st.write("")  # Spacing
-                if st.button("Delete Selected Document", type="secondary"):
+                st.write("")
+                st.write("")
+                if st.button("Delete Selected Document", type="secondary", key="del_btn"):
                     target = next(item for item in table_data if item["File Name"] == doc_to_delete_name)
                     try:
                         # Storage deletion
@@ -185,6 +193,7 @@ def render_module_3():
                 data=df_display.to_csv(index=False),
                 file_name=f"vault_repository_{selected_client_name}.csv",
                 mime="text/csv",
+                key="dl_vault_csv"
             )
         else:
             st.info("No documents uploaded for this client yet.")
