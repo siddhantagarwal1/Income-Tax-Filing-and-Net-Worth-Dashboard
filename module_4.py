@@ -50,6 +50,28 @@ def parse_document_content(file_name: str, category: str) -> dict:
             "total_debits": 1420000.00,
             "interest_credited": 12500.00,
         }
+    elif category == "Sovereign Gold Bond (SGB) Certificates":
+        return {
+            "issuing_authority": "Reserve Bank of India",
+            "investment_amount": 250000.00,
+            "units_held": 50,
+            "interest_rate_pct": 2.5,
+            "annual_interest_payout": 6250.00,
+        }
+    elif category == "Demat Holdings Reports":
+        return {
+            "broker_name": "Zerodha",
+            "portfolio_value": 1250000.00,
+            "equity_holdings_count": 8,
+            "mutual_fund_nav_value": 450000.00,
+        }
+    elif category == "Broker Capital Gains Statements":
+        return {
+            "broker_name": "Zerodha",
+            "stcg_equity_sec111a": 45000.00,
+            "ltcg_equity_sec112a": 115000.00,
+            "total_turnover": 850000.00,
+        }
     else:
         return {
             "extracted_text_summary": f"Generic extraction for {file_name}",
@@ -142,6 +164,9 @@ def render_module_4():
         "AIS/TIS Documents": "AIS_TIS",
         "Bank Statements": "BANK_STATEMENT",
         "Broker Capital Gains Statements": "CAPITAL_GAINS_STATEMENT",
+        "Sovereign Gold Bond (SGB) Certificates": "SGB_CERTIFICATE",
+        "Demat Holdings Reports": "DEMAT_HOLDINGS",
+        "Previous Year ITRs": "PREVIOUS_YEAR_ITR",
     }
     enum_type = category_enum_map.get(target_doc["category"], "AIS_TIS")
 
