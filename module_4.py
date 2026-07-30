@@ -19,36 +19,35 @@ supabase = init_supabase()
 
 
 # --- Helper Extraction Routines ---
-def _clean_number(val: str) -> float:
+def _clean_number(val) -> float:
     """Helper to convert string amounts to float strictly."""
-    if not val:
+    if val is None:
         return 0.0
     clean = re.sub(r"[^\d.-]", "", str(val).replace(",", ""))
     try:
-        return float(clean)
+        return float(clean) if clean else 0.0
     except ValueError:
         return 0.0
 
 
 def parse_bank_statement(pdf: pdfplumber.PDF, raw_text: str) -> dict:
-    """Parses full bank transaction ledgers, summaries, and performs accounting validation."""
+    """Extracts structured line-by-line transaction ledgers and verifies balance reconciliation."""
     ledger = []
-    
-    # 1. Page-by-page table processing for multi-column bank ledgers
+
     for page in pdf.pages:
         tables = page.extract_tables()
         for table in tables:
             if not table or len(table) < 2:
                 continue
-            
-            # Map column indices based on header row inspect
+
+            # Identify headers
             header = [str(c).lower().strip() if c else "" for c in table[0]]
             
-            date_idx, desc_idx, dr_idx, cr_idx, bal_idx = -1, -1, -1, -1, -1
+            date_idx, desc_idx, dr_idx, cr_idx, bal_idx, amt_idx = -1, -1, -1, -1, -1, -1
             for i, h in enumerate(header):
                 if "date" in h:
                     date_idx = i
-                elif any(k in h for k in ["narration", "particular", "description", "details"]):
+                elif any(k in h for k in ["narration", "particular", "description", "details", "remark"]):
                     desc_idx = i
                 elif any(k in h for k in ["debit", "withdrawal", "dr"]):
                     dr_idx = i
@@ -56,62 +55,81 @@ def parse_bank_statement(pdf: pdfplumber.PDF, raw_text: str) -> dict:
                     cr_idx = i
                 elif "balance" in h:
                     bal_idx = i
+                elif "amount" in h:
+                    amt_idx = i
 
-            # Fallback row iteration
             for row in table[1:]:
-                if not row or len(row) < 3:
+                if not row or all(c is None or str(c).strip() == "" for c in row):
                     continue
-                
+
                 row_str = " ".join([str(c) for c in row if c])
                 
-                # Extract date entry pattern
-                date_match = re.search(r"\b\d{2}[/-]\d{2}[/-]\d{2,4}\b", row_str)
+                # Verify row contains a valid date
+                date_match = re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", row_str)
                 if not date_match:
                     continue
-                
+
                 txn_date = date_match.group(0)
-                desc = str(row[desc_idx]) if desc_idx != -1 and desc_idx < len(row) else row_str
+                desc = str(row[desc_idx]).strip() if desc_idx != -1 and desc_idx < len(row) and row[desc_idx] else row_str
+
                 debit = _clean_number(row[dr_idx]) if dr_idx != -1 and dr_idx < len(row) else 0.0
                 credit = _clean_number(row[cr_idx]) if cr_idx != -1 and cr_idx < len(row) else 0.0
                 balance = _clean_number(row[bal_idx]) if bal_idx != -1 and bal_idx < len(row) else 0.0
 
-                # Tax/Financial Categorization Engine Rules
+                # Handle combined Amount + Type columns if Debit/Credit columns aren't split
+                if dr_idx == -1 and cr_idx == -1 and amt_idx != -1 and amt_idx < len(row):
+                    amt_val = _clean_number(row[amt_idx])
+                    if "CR" in row_str.upper() or "DEPOSIT" in row_str.upper():
+                        credit = amt_val
+                    else:
+                        debit = amt_val
+
+                if debit == 0.0 and credit == 0.0:
+                    continue
+
+                txn_type = "Credit" if credit > 0 else "Debit"
+                amount = credit if credit > 0 else debit
+
+                # Tax Categorization Engine
                 category = "General Transfer"
                 desc_upper = desc.upper()
-                if any(term in desc_upper for term in ["INT.PD", "INT CREDIT", "SAVINGS INTEREST", "INTEREST PAID"]):
-                    category = "Interest Income - Savings Account (Sec 80TTA/80TTB)"
+                if any(term in desc_upper for term in ["INT.PD", "INT CREDIT", "SAVINGS INTEREST", "INTEREST PAID", "INT PROCESS"]):
+                    category = "Savings Interest (Sec 80TTA/80TTB)"
                 elif "FD INT" in desc_upper or "TERM DEPOSIT INT" in desc_upper:
-                    category = "Interest Income - Fixed Deposit"
+                    category = "Fixed Deposit Interest"
                 elif "DIVIDEND" in desc_upper or "DIV" in desc_upper:
                     category = "Dividend Income (Sec 56(2)(i))"
                 elif "SGB" in desc_upper and "INT" in desc_upper:
                     category = "SGB Interest Income"
                 elif "REFUND" in desc_upper or "INCOME TAX" in desc_upper:
-                    category = "Income Tax Refund & Sec 244A Interest"
+                    category = "Income Tax Refund (Sec 244A)"
 
                 ledger.append({
                     "date": txn_date,
-                    "description": desc.strip(),
+                    "description": desc,
+                    "transaction_type": txn_type,
+                    "amount": amount,
                     "debit": debit,
                     "credit": credit,
-                    "balance": balance,
-                    "category": category
+                    "running_balance": balance,
+                    "classified_category": category
                 })
 
-    # 2. Extract Opening & Closing Summaries
+    # Summary extraction & Reconciliation logic
     op_match = re.search(r"(?i)(?:opening balance|b/f)\D*([\d,]+\.\d{2})", raw_text)
     cl_match = re.search(r"(?i)(?:closing balance|c/f)\D*([\d,]+\.\d{2})", raw_text)
-    
-    opening_bal = _clean_number(op_match.group(1)) if op_match else 0.0
-    closing_bal = _clean_number(cl_match.group(1)) if cl_match else 0.0
-    
+
+    opening_bal = _clean_number(op_match.group(1)) if op_match else (ledger[0]["running_balance"] - ledger[0]["credit"] + ledger[0]["debit"] if ledger else 0.0)
+    closing_bal = _clean_number(cl_match.group(1)) if cl_match else (ledger[-1]["running_balance"] if ledger else 0.0)
+
     total_credits = sum(item["credit"] for item in ledger)
     total_debits = sum(item["debit"] for item in ledger)
-    
-    calc_closing = round(opening_bal + total_credits - total_debits, 2)
-    reconciliation_passed = bool(abs(calc_closing - closing_bal) <= 1.0 or not closing_bal)
 
-    interest_entries = [t["credit"] for t in ledger if "Interest Income" in t["category"]]
+    calc_closing = round(opening_bal - total_debits + total_credits, 2)
+    reconciliation_passed = bool(abs(calc_closing - closing_bal) <= 1.0) if closing_bal > 0 else True
+
+    detected_interest_items = [t for t in ledger if "Interest" in t["classified_category"]]
+    total_interest_detected = sum(t["amount"] for t in detected_interest_items)
 
     return {
         "summary": {
@@ -122,54 +140,41 @@ def parse_bank_statement(pdf: pdfplumber.PDF, raw_text: str) -> dict:
             "calculated_closing_balance": calc_closing,
             "reconciliation_passed": reconciliation_passed
         },
-        "interest_items": {
-            "entries": interest_entries,
-            "total_interest": sum(interest_entries)
-        },
+        "total_interest_detected": total_interest_detected,
+        "interest_transactions": detected_interest_items,
         "transaction_ledger": ledger
     }
 
 
 def parse_ais_tis(raw_text: str) -> dict:
-    """Parses AIS/TIS line items for TDS, Dividends, Interest, and Tax Refunds."""
-    tds_matches = re.findall(r"(?i)(?:tds|tax deducted)\D*([\d,]+\.\d{2})", raw_text)
-    dividend_matches = re.findall(r"(?i)(?:dividend)\D*([\d,]+\.\d{2})", raw_text)
-    interest_matches = re.findall(r"(?i)(?:interest from savings|194a)\D*([\d,]+\.\d{2})", raw_text)
-    refund_matches = re.findall(r"(?i)(?:refund|244a)\D*([\d,]+\.\d{2})", raw_text)
-
+    """Parses AIS/TIS figures."""
+    tds = re.findall(r"(?i)(?:tds|tax deducted)\D*([\d,]+\.\d{2})", raw_text)
+    interest = re.findall(r"(?i)(?:interest from savings|194a)\D*([\d,]+\.\d{2})", raw_text)
     return {
-        "reported_tds_total": sum([_clean_number(x) for x in tds_matches]),
-        "reported_dividend_total": sum([_clean_number(x) for x in dividend_matches]),
-        "reported_interest_total": sum([_clean_number(x) for x in interest_matches]),
-        "reported_refund_total": sum([_clean_number(x) for x in refund_matches])
+        "reported_tds_total": sum([_clean_number(x) for x in tds]),
+        "reported_interest_total": sum([_clean_number(x) for x in interest]),
     }
 
 
 def parse_sgb_certificate(raw_text: str) -> dict:
-    """Parses SGB bond series, units, amounts, and expected semi-annual interest."""
+    """Parses SGB details."""
     series = re.search(r"(?i)(?:series|tranche)\D*([A-Z0-9/-]+)", raw_text)
     units = re.search(r"(?i)(?:units|quantity)\D*(\d+)", raw_text)
     amount = re.search(r"(?i)(?:amount|consideration|issue price)\D*([\d,]+\.\d{2})", raw_text)
-    
-    qty = int(units.group(1)) if units else 0
     inv_amount = _clean_number(amount.group(1)) if amount else 0.0
-    expected_annual_interest = round(inv_amount * 0.025, 2)  # 2.5% p.a. standard SGB rate
-
     return {
         "bond_series": series.group(1) if series else "Unknown",
-        "units_held": qty,
+        "units_held": int(units.group(1)) if units else 0,
         "investment_amount": inv_amount,
-        "expected_annual_interest": expected_annual_interest,
-        "expected_semi_annual_payout": round(expected_annual_interest / 2, 2)
+        "expected_semi_annual_payout": round((inv_amount * 0.025) / 2, 2)
     }
 
 
 def parse_ppf_passbook(raw_text: str) -> dict:
-    """Parses PPF contributions, interest credits, and closing balance."""
+    """Parses PPF details."""
     contributions = re.findall(r"(?i)(?:deposit|subscription)\D*([\d,]+\.\d{2})", raw_text)
     interest = re.search(r"(?i)(?:interest credited|int paid)\D*([\d,]+\.\d{2})", raw_text)
     balance = re.search(r"(?i)(?:closing balance|balance c/f)\D*([\d,]+\.\d{2})", raw_text)
-
     return {
         "total_contributions": sum([_clean_number(c) for c in contributions]),
         "interest_credited": _clean_number(interest.group(1)) if interest else 0.0,
@@ -177,11 +182,10 @@ def parse_ppf_passbook(raw_text: str) -> dict:
     }
 
 
-# --- Unified Deterministic PDF & Document Parser Engine ---
+# --- Unified Parser Engine Router ---
 def parse_document_content(
     file_bytes: bytes, file_name: str, category: str, password: str = None
 ) -> dict:
-    """Unified engine to route document binary content into specific tax parsers."""
     cat_upper = category.upper()
     raw_text = ""
 
@@ -201,20 +205,15 @@ def parse_document_content(
 
             if "BANK" in cat_upper:
                 extracted_data["parsed_bank_details"] = parse_bank_statement(pdf, raw_text)
-
             elif "AIS" in cat_upper or "TIS" in cat_upper:
                 extracted_data["parsed_ais_tis_details"] = parse_ais_tis(raw_text)
-
             elif "SGB" in cat_upper or "SOVEREIGN GOLD BOND" in cat_upper:
                 extracted_data["parsed_sgb_details"] = parse_sgb_certificate(raw_text)
-
             elif "PPF" in cat_upper or "PROVIDENT FUND" in cat_upper:
                 extracted_data["parsed_ppf_details"] = parse_ppf_passbook(raw_text)
-
             elif "FORM 16" in cat_upper or "16A" in cat_upper:
                 pan = re.search(r"[A-Z]{5}[0-9]{4}[A-Z]{1}", raw_text)
                 extracted_data["pan_detected"] = pan.group(0) if pan else None
-
             else:
                 extracted_data["summary_preview"] = raw_text[:500] if raw_text else "No text found."
 
@@ -225,7 +224,6 @@ def parse_document_content(
 
 
 def get_doc_enum_type(category: str) -> str:
-    """Maps document categories to target Supabase ENUM types."""
     cat_upper = category.upper()
     if "FORM 16" in cat_upper or "16A" in cat_upper:
         return "FORM_16"
@@ -258,7 +256,6 @@ def render_module_4():
         unsafe_allow_html=True,
     )
 
-    # 1. Active Client Selector
     try:
         clients_res = (
             supabase.table("client_profiles")
@@ -287,7 +284,6 @@ def render_module_4():
 
     st.divider()
 
-    # 2. Vault Document Selector for Ingestion
     st.markdown(
         "<h3 style='color: #1e3a8a; margin-bottom: 16px;'>1. Trigger Document Parsing Engine</h3>",
         unsafe_allow_html=True,
@@ -367,7 +363,6 @@ def render_module_4():
 
     st.divider()
 
-    # 3. Parsed Data Staging Viewer
     st.markdown(
         "<h3 style='color: #1e3a8a; margin-bottom: 16px;'>2. Parsed Data Staging Repository</h3>",
         unsafe_allow_html=True,
