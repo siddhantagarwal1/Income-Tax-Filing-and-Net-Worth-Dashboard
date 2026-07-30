@@ -125,7 +125,7 @@ def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
 
 
 def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, layout_meta: dict) -> dict:
-    """Multi-page table & text parsing engine with strict state deduplication and direction resolution."""
+    """Multi-page table & text parsing engine with strict table precedence and exact delta deduplication."""
     ledger = []
     STRICT_CURRENCY_REGEX = r"^\d{1,3}(,\d{2,3})*\.\d{2}$|^\d+\.\d{2}$"
 
@@ -223,7 +223,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             if current_entry:
                 ledger.append(current_entry)
 
-    # 2. Multi-Page Spatial Line Fallback
+    # 2. Spatial Line Fallback (Only executed if primary table parsing yielded NO entries)
     if not ledger:
         for layout in spatial_analysis["layouts"]:
             for line in layout["lines"]:
@@ -267,12 +267,12 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     "running_balance": balance,
                 })
 
-    # 3. Robust Deduplication (Combines Date, Debit, Credit, and Truncated Description Anchor)
+    # 3. Exact Multi-Pass Deduplication
     unique_ledger = []
     seen_transactions = set()
     for item in ledger:
-        desc_prefix = re.sub(r"\s+", "", item["description"])[:25].upper()
-        dedup_key = (item["date"], item["debit"], item["credit"], desc_prefix)
+        amount = item["debit"] if item["debit"] > 0 else item["credit"]
+        dedup_key = (item["date"], item["debit"], item["credit"], amount)
         
         if dedup_key not in seen_transactions:
             seen_transactions.add(dedup_key)
