@@ -121,13 +121,13 @@ def analyze_and_register_layout(doc_type: str, spatial_analysis: dict) -> dict:
         first_meaningful_line = text_lines[0][:30] if text_lines else "GENERIC_DOC"
         signature_kw = [first_meaningful_line]
 
-    # Target primary transaction ledger headers
+    # Target primary transaction ledger headers (Strictly bypass non-ledger summary blocks)
     header_keywords = ["date", "particulars", "description", "withdrawal", "deposit", "debit", "credit", "balance"]
     detected_headers = []
     
     for line in full_text.split("\n"):
         line_low = line.lower()
-        if any(bad_kw in line_low for bad_kw in ["nomination", "fixed deposits", "account type", "balance(i)"]):
+        if any(bad_kw in line_low for bad_kw in ["nomination", "fixed deposits", "account type", "balance(i)", "balance(i+ii)", "(linked)"]):
             continue
         if any(h in line_low for h in header_keywords) and len(line_low.split()) >= 3:
             detected_headers = [w.strip() for w in line.split() if len(w.strip()) > 2]
@@ -182,8 +182,8 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             for row_idx, row in enumerate(table):
                 header_candidate = [str(c).lower().strip() if c else "" for c in row]
                 
-                # Filter out ICICI summary headers explicitly
-                if any(any(bad in h for bad in ["nomination", "fixed deposits", "account type", "balance(i)", "balance(i+ii)"]) for h in header_candidate):
+                # Filter out summary/account detail headers explicitly
+                if any(any(bad in h for bad in ["nomination", "fixed deposits", "account type", "balance(i)", "balance(i+ii)", "(linked)"]) for h in header_candidate):
                     continue
 
                 if any(any(k in h for k in ["particulars", "description", "narration", "transaction details", "remarks"]) for h in header_candidate):
