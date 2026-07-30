@@ -76,10 +76,12 @@ def analyze_pdf_spatial_structure(pdf: pdfplumber.PDF) -> dict:
     }
 
 
-def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
-    """Matches or registers document layout metadata in Supabase."""
-    raw_upper = raw_text.upper()
+def analyze_and_register_layout(doc_type: str, spatial_analysis: dict) -> dict:
+    """Phase 1: Analyzes document signature/layout and matches or registers rules in layout_registry."""
+    full_text = spatial_analysis["full_text"]
+    raw_upper = full_text.upper()
 
+    # Search for pre-existing signatures in layout_registry
     try:
         res = supabase.table("layout_registry").select("*").eq("doc_type", doc_type).execute()
         registered_layouts = res.data or []
@@ -87,30 +89,57 @@ def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
         for reg in registered_layouts:
             keywords = reg.get("signature_keywords", [])
             if keywords and all(kw.upper() in raw_upper for kw in keywords):
-                return {"matched": True, "institution": reg["institution_identifier"], "rules": reg["layout_rules"]}
+                return {
+                    "matched": True,
+                    "institution": reg["institution_identifier"],
+                    "rules": reg["layout_rules"],
+                    "signature_keywords": keywords,
+                    "source": "REGISTRY_MATCH"
+                }
     except Exception:
         pass
 
+    # Self-learning heuristic identification engine
     institution = "GENERIC_PARSER"
+    signature_kw = []
+
     if "ICICI" in raw_upper:
         institution = "ICICI_BANK"
         signature_kw = ["ICICI", "STATEMENT OF ACCOUNT"]
     elif "IDFC" in raw_upper:
         institution = "IDFC_FIRST"
-        signature_kw = ["IDFC", "STATEMENT OF ACCOUNT", "Particulars"]
+        signature_kw = ["IDFC", "STATEMENT OF ACCOUNT", "PARTICULARS"]
     elif "ANNUAL INFORMATION STATEMENT" in raw_upper or "AIS" in raw_upper:
         institution = "INCOME_TAX_AIS"
         signature_kw = ["ANNUAL INFORMATION STATEMENT", "TAX DEDUCTED"]
+    elif "TAX DEDUCTION AND COLLECTION ACCOUNT NUMBER" in raw_upper or "FORM NO. 16" in raw_upper:
+        institution = "INCOME_TAX_FORM16"
+        signature_kw = ["FORM NO. 16", "EMPLOYER"]
+    elif "SOVEREIGN GOLD BOND" in raw_upper or "SGB" in raw_upper:
+        institution = "RBI_SGB"
+        signature_kw = ["SOVEREIGN GOLD BOND", "CERTIFICATE OF HOLDING"]
     else:
-        first_line = raw_text.split("\n")[0] if raw_text else "UNKNOWN"
-        signature_kw = [first_line[:20]] if len(first_line) >= 5 else ["GENERIC_DOC"]
+        text_lines = [line.strip() for line in full_text.split("\n") if line.strip()]
+        first_meaningful_line = text_lines[0][:30] if text_lines else "GENERIC_DOC"
+        signature_kw = [first_meaningful_line]
+
+    # Dynamically extract table header structures
+    header_keywords = ["date", "particulars", "debit", "credit", "balance"]
+    detected_headers = []
+    for line in full_text.split("\n"):
+        line_low = line.lower()
+        if any(h in line_low for h in header_keywords) and len(line_low.split()) >= 3:
+            detected_headers = [w.strip() for w in line.split() if len(w.strip()) > 2]
+            break
 
     generated_rules = {
-        "date_regex": r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
-        "header_keywords": ["date", "particulars", "debit", "credit", "balance"],
-        "parse_mode": "SPATIAL_HYBRID"
+        "date_regex": r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}-[A-Za-z]{3}-\d{2,4})\b",
+        "header_keywords": detected_headers if detected_headers else header_keywords,
+        "parse_mode": "SPATIAL_HYBRID",
+        "currency_strict": True
     }
 
+    # Register newly learned document layout into database
     try:
         supabase.table("layout_registry").insert({
             "doc_type": doc_type,
@@ -121,7 +150,13 @@ def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
     except Exception:
         pass
 
-    return {"matched": False, "institution": institution, "rules": generated_rules}
+    return {
+        "matched": False,
+        "institution": institution,
+        "rules": generated_rules,
+        "signature_keywords": signature_kw,
+        "source": "NEWLY_LEARNED"
+    }
 
 
 def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, layout_meta: dict) -> dict:
@@ -409,9 +444,9 @@ def parse_sgb_certificate_spatial(spatial_analysis: dict) -> dict:
 
 
 def parse_document_content(
-    file_bytes: bytes, file_name: str, category: str, password: str = None
+    file_bytes: bytes, file_name: str, category: str, layout_meta: dict, password: str = None
 ) -> dict:
-    """Main document router for PDFs and Excel sheets."""
+    """Phase 2: Executable parsing engine using layout parameters."""
     cat_upper = category.upper()
 
     if file_name.endswith(".xlsx") or file_name.endswith(".xls"):
@@ -421,8 +456,6 @@ def parse_document_content(
         open_kwargs = {"password": password} if password else {}
         with pdfplumber.open(io.BytesIO(file_bytes), **open_kwargs) as pdf:
             spatial_analysis = analyze_pdf_spatial_structure(pdf)
-            enum_type = get_doc_enum_type(category)
-            layout_meta = match_or_register_layout(enum_type, spatial_analysis["full_text"])
 
             extracted_data = {
                 "file_name": file_name,
@@ -480,7 +513,7 @@ def render_module_4():
         """
         <div class="module-header-container">
             <div class="module-title">Module 4: Financial & Tax Data Ingestion Engine</div>
-            <div class="module-subtitle">Multi-Page Spatial Layout Analysis, Structured Extraction & Ledger Staging</div>
+            <div class="module-subtitle">Two-Phase Layout Recognition, Universal Learning & Automated Extraction</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -515,7 +548,7 @@ def render_module_4():
     st.divider()
 
     st.markdown(
-        "<h3 style='color: #1e3a8a; margin-bottom: 16px;'>1. Trigger Document Parsing Engine</h3>",
+        "<h3 style='color: #1e3a8a; margin-bottom: 16px;'>1. Two-Phase Ingestion Engine Control</h3>",
         unsafe_allow_html=True,
     )
 
@@ -539,43 +572,72 @@ def render_module_4():
         f"{doc['file_name']} [{doc['category']}]": doc for doc in vault_files
     }
 
-    col1, col2 = st.columns([3, 1])
-
-    with col1:
-        selected_doc_label = st.selectbox(
-            "Select Uploaded Document to Ingest & Parse*",
-            list(doc_map.keys()),
-            key="m4_doc_select",
-        )
+    selected_doc_label = st.selectbox(
+        "Select Uploaded Document to Process*",
+        list(doc_map.keys()),
+        key="m4_doc_select",
+    )
 
     target_doc = doc_map[selected_doc_label]
     enum_type = get_doc_enum_type(target_doc["category"])
 
-    with col2:
-        st.write("")
-        st.write("")
-        parse_btn = st.button("Parse Document", type="primary", key="m4_parse_btn")
+    # Action Buttons: Phase 1 & Phase 2
+    btn_col1, btn_col2 = st.columns([1, 1])
 
-    show_debug = st.checkbox("Enable Multi-Page Layout Debug Inspector", value=True, key="m4_debug_chk")
+    with btn_col1:
+        analyze_btn = st.button("Phase 1: Analyze & Learn Document Layout", type="secondary", use_container_width=True, key="m4_analyze_btn")
 
-    if parse_btn:
-        with st.spinner(f"Running Multi-Page Spatial Extraction on {target_doc['file_name']}..."):
+    with btn_col2:
+        parse_btn = st.button("Phase 2: Execute Ingestion & Parsing", type="primary", use_container_width=True, key="m4_parse_btn")
+
+    # Helper function to fetch target file bytes
+    def _fetch_selected_file_bytes():
+        try:
+            return supabase.storage.from_("client_vault").download(target_doc["file_path"])
+        except Exception:
+            return supabase.storage.from_("vault_documents").download(target_doc["file_path"])
+
+    # Phase 1 Execution Routine
+    if analyze_btn:
+        with st.spinner(f"Analyzing structure & signatures for {target_doc['file_name']}..."):
             try:
-                try:
-                    file_bytes = supabase.storage.from_("client_vault").download(target_doc["file_path"])
-                except Exception:
-                    file_bytes = supabase.storage.from_("vault_documents").download(target_doc["file_path"])
+                file_bytes = _fetch_selected_file_bytes()
+                file_password = target_doc.get("file_password") if target_doc.get("is_password_protected") else None
 
-                file_password = (
-                    target_doc.get("file_password")
-                    if target_doc.get("is_password_protected")
-                    else None
-                )
+                if target_doc["file_name"].endswith(".xlsx") or target_doc["file_name"].endswith(".xls"):
+                    st.info("Excel Document Selected: Worksheets and column schemes are auto-mapped directly.")
+                else:
+                    open_kwargs = {"password": file_password} if file_password else {}
+                    with pdfplumber.open(io.BytesIO(file_bytes), **open_kwargs) as pdf:
+                        spatial_analysis = analyze_pdf_spatial_structure(pdf)
+                        layout_result = analyze_and_register_layout(enum_type, spatial_analysis)
+                        st.session_state[f"layout_meta_{target_doc['id']}"] = layout_result
+
+                        st.success(f"Layout Analysis Complete! Source: {layout_result['source']}")
+                        st.json(layout_result)
+            except Exception as err:
+                st.error(f"Phase 1 Analysis failed: {str(err)}")
+
+    # Phase 2 Execution Routine
+    if parse_btn:
+        with st.spinner(f"Executing Ingestion & Tax Reconciliation on {target_doc['file_name']}..."):
+            try:
+                file_bytes = _fetch_selected_file_bytes()
+                file_password = target_doc.get("file_password") if target_doc.get("is_password_protected") else None
+
+                # Fetch or auto-analyze layout metadata
+                layout_meta = st.session_state.get(f"layout_meta_{target_doc['id']}")
+                if not layout_meta and not (target_doc["file_name"].endswith(".xlsx") or target_doc["file_name"].endswith(".xls")):
+                    open_kwargs = {"password": file_password} if file_password else {}
+                    with pdfplumber.open(io.BytesIO(file_bytes), **open_kwargs) as pdf:
+                        spatial_analysis = analyze_pdf_spatial_structure(pdf)
+                        layout_meta = analyze_and_register_layout(enum_type, spatial_analysis)
 
                 parsed_json = parse_document_content(
                     file_bytes=file_bytes,
                     file_name=target_doc["file_name"],
                     category=target_doc["category"],
+                    layout_meta=layout_meta or {},
                     password=file_password,
                 )
 
@@ -595,16 +657,14 @@ def render_module_4():
 
     st.divider()
 
+    show_debug = st.checkbox("Enable Multi-Page Layout Debug Inspector", value=False, key="m4_debug_chk")
+
     # --- Multi-Page Debug Inspector Output ---
     if show_debug:
         st.markdown("<h4 style='color: #d97706;'>Multi-Page Layout Debug Inspector</h4>", unsafe_allow_html=True)
         if st.button("Inspect All Pages Raw Text & Layout Structures", key="btn_run_inspect"):
             try:
-                try:
-                    file_bytes = supabase.storage.from_("client_vault").download(target_doc["file_path"])
-                except Exception:
-                    file_bytes = supabase.storage.from_("vault_documents").download(target_doc["file_path"])
-
+                file_bytes = _fetch_selected_file_bytes()
                 open_kwargs = {"password": target_doc.get("file_password")} if target_doc.get("is_password_protected") else {}
                 with pdfplumber.open(io.BytesIO(file_bytes), **open_kwargs) as pdf:
                     st.write("**Total Pages in Document:**", len(pdf.pages))
@@ -622,7 +682,7 @@ def render_module_4():
             except Exception as inspect_err:
                 st.error(f"Debug inspection failed: {str(inspect_err)}")
 
-    st.divider()
+        st.divider()
 
     st.markdown(
         "<h3 style='color: #1e3a8a; margin-bottom: 16px;'>2. Parsed Data Staging Repository</h3>",
