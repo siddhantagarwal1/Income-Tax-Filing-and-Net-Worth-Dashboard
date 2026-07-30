@@ -76,11 +76,60 @@ def analyze_pdf_spatial_structure(pdf: pdfplumber.PDF) -> dict:
     }
 
 
-def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict) -> dict:
+def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
     """
-    Robust Bank Statement Parser with:
-    1. Table-based extraction using expanded multi-bank header dictionaries (IDFC, ICICI, etc.).
-    2. Spatial Text-Line Fallback Engine for frameless or non-standard PDF structures.
+    Looks up existing signature keywords in layout_registry.
+    If match found, returns layout_rules.
+    If no match, creates signature, registers in layout_registry, and returns rules.
+    """
+    try:
+        res = supabase.table("layout_registry").select("*").eq("doc_type", doc_type).execute()
+        registered_layouts = res.data or []
+
+        for reg in registered_layouts:
+            keywords = reg.get("signature_keywords", [])
+            if keywords and all(kw.upper() in raw_text.upper() for kw in keywords):
+                return {"matched": True, "institution": reg["institution_identifier"], "rules": reg["layout_rules"]}
+    except Exception:
+        pass
+
+    # Dynamic Signature Generation
+    institution = "GENERIC_PARSER"
+    if "IDFC" in raw_text.upper():
+        institution = "IDFC_FIRST"
+        signature_kw = ["IDFC", "STATEMENT OF ACCOUNT", "Particulars"]
+    elif "ICICI" in raw_text.upper():
+        institution = "ICICI_BANK"
+        signature_kw = ["ICICI", "STATEMENT OF ACCOUNT"]
+    elif "ANNUAL INFORMATION STATEMENT" in raw_text.upper() or "AIS" in raw_text.upper():
+        institution = "INCOME_TAX_AIS"
+        signature_kw = ["ANNUAL INFORMATION STATEMENT", "TAX DEDUCTED"]
+    else:
+        first_line = raw_text.split("\n")[0] if raw_text else "UNKNOWN"
+        signature_kw = [first_line[:20]] if len(first_line) >= 5 else ["GENERIC_DOC"]
+
+    generated_rules = {
+        "date_regex": r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
+        "header_keywords": ["date", "particulars", "debit", "credit", "balance"],
+        "parse_mode": "SPATIAL_HYBRID"
+    }
+
+    try:
+        supabase.table("layout_registry").insert({
+            "doc_type": doc_type,
+            "institution_identifier": institution,
+            "signature_keywords": signature_kw,
+            "layout_rules": generated_rules
+        }).execute()
+    except Exception:
+        pass
+
+    return {"matched": False, "institution": institution, "rules": generated_rules}
+
+
+def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, layout_meta: dict) -> dict:
+    """
+    Robust Bank Statement Parser using registered layout rules and multi-pass extraction.
     """
     ledger = []
     
@@ -159,7 +208,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict) ->
                         "classified_category": category,
                     })
 
-    # 2. Spatial Text-Line Fallback Pass (Triggers if table extraction yields zero rows)
+    # 2. Spatial Text-Line Fallback Pass
     if not ledger:
         for layout in spatial_analysis["layouts"]:
             for line in layout["lines"]:
@@ -176,7 +225,6 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict) ->
 
                 num_amounts = [_clean_number(a) for a in amounts]
                 
-                # Rule-based position mapping for line-text amounts
                 balance = num_amounts[-1] if len(num_amounts) >= 1 else 0.0
                 txn_amount = num_amounts[-2] if len(num_amounts) >= 2 else num_amounts[0]
 
@@ -210,6 +258,8 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict) ->
 
     # Balance Extraction & Logic Proof
     full_text = spatial_analysis["full_text"]
+    
+    # Check multi-word Opening/Closing balance blocks
     op_match = re.search(r"(?i)(?:opening balance|b/f)\D*([\d,]+\.\d{2})", full_text)
     cl_match = re.search(r"(?i)(?:closing balance|c/f)\D*([\d,]+\.\d{2})", full_text)
 
@@ -226,6 +276,8 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict) ->
     total_interest_detected = sum(t["amount"] for t in detected_interest_items)
 
     return {
+        "layout_matched": layout_meta.get("matched", False),
+        "institution_identified": layout_meta.get("institution", "GENERIC"),
         "summary": {
             "opening_balance": opening_bal,
             "total_credits": round(total_credits, 2),
@@ -303,15 +355,18 @@ def parse_document_content(
         open_kwargs = {"password": password} if password else {}
         with pdfplumber.open(io.BytesIO(file_bytes), **open_kwargs) as pdf:
             spatial_analysis = analyze_pdf_spatial_structure(pdf)
+            enum_type = get_doc_enum_type(category)
+            layout_meta = match_or_register_layout(enum_type, spatial_analysis["full_text"])
 
             extracted_data = {
                 "file_name": file_name,
                 "category": category,
                 "pages_analyzed": spatial_analysis["page_count"],
+                "layout_meta": layout_meta,
             }
 
             if "BANK" in cat_upper:
-                extracted_data["parsed_bank_details"] = parse_bank_statement_spatial(pdf, spatial_analysis)
+                extracted_data["parsed_bank_details"] = parse_bank_statement_spatial(pdf, spatial_analysis, layout_meta)
             elif "AIS" in cat_upper or "TIS" in cat_upper:
                 extracted_data["parsed_ais_tis_details"] = parse_ais_tis_spatial(spatial_analysis)
             elif "SGB" in cat_upper or "SOVEREIGN GOLD BOND" in cat_upper:
@@ -359,7 +414,7 @@ def render_module_4():
         """
         <div class="module-header-container">
             <div class="module-title">Module 4: Financial & Tax Data Ingestion Engine</div>
-            <div class="module-subtitle">Spatial Layout Analysis, Structured Extraction & Ledger Staging</div>
+            <div class="module-subtitle">Layout Signature Registry, Spatial Analysis & Ledger Staging</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -435,11 +490,10 @@ def render_module_4():
         st.write("")
         parse_btn = st.button("Parse Document", type="primary", key="m4_parse_btn")
 
-    # Debug Inspector Toggle
     show_debug = st.checkbox("Enable Layout Debug Inspector", value=True, key="m4_debug_chk")
 
     if parse_btn:
-        with st.spinner(f"Running Extraction & Debug Analysis on {target_doc['file_name']}..."):
+        with st.spinner(f"Running Extraction & Layout Registry Analysis on {target_doc['file_name']}..."):
             try:
                 try:
                     file_bytes = supabase.storage.from_("client_vault").download(target_doc["file_path"])
