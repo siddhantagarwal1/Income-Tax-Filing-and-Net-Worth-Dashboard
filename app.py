@@ -6,68 +6,79 @@ from supabase import create_client, Client
 # --- Page Configuration ---
 st.set_page_config(page_title="Tax & Wealth OS", layout="wide")
 
-# --- Custom Styling (Apple-inspired Modern Theme) ---
+# --- Custom Styling (Executive Dark & Royal Blue Theme) ---
 st.markdown(
     """
     <style>
-    /* Global Container Styling */
+    /* Main App Background */
     .stApp {
-        background-color: #f5f5f7;
-        color: #1d1d1f;
+        background-color: #0b132b;
+        color: #ffffff;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     }
     
     /* Sidebar Styling */
     section[data-testid="stSidebar"] {
-        background-color: #ffffff;
-        border-right: 1px solid #e5e5ea;
+        background-color: #1c2541;
+        border-right: 1px solid #3a506b;
     }
     
-    /* Headers & Cards */
+    /* Headers & Navigation Cards */
+    .sidebar-header {
+        background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%);
+        color: #ffffff;
+        padding: 14px 18px;
+        border-radius: 10px;
+        font-weight: 700;
+        font-size: 18px;
+        margin-bottom: 14px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+    }
+    
+    .sidebar-subheader {
+        background-color: #1c2541;
+        color: #93c5fd;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-weight: 600;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        margin-bottom: 12px;
+        border: 1px solid #3a506b;
+    }
+    
+    /* Module Header Block */
     .module-header-container {
-        background-color: #ffffff;
-        border: 1px solid #e5e5ea;
+        background: linear-gradient(135deg, #1e3a8a 0%, #1d4ed8 100%);
+        border: 1px solid #3b82f6;
         border-radius: 12px;
-        padding: 20px;
+        padding: 24px;
         margin-bottom: 24px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.03);
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
     }
     
     .module-title {
-        color: #1d1d1f;
-        font-size: 24px;
-        font-weight: 600;
+        color: #ffffff;
+        font-size: 26px;
+        font-weight: 700;
         margin: 0;
     }
     
     .module-subtitle {
-        color: #86868b;
-        font-size: 14px;
+        color: #bfdbfe;
+        font-size: 15px;
         font-weight: 400;
-        margin-top: 4px;
+        margin-top: 6px;
     }
     
-    .sidebar-header {
-        background-color: #0071e3;
-        color: white;
-        padding: 12px 16px;
-        border-radius: 8px;
-        font-weight: 600;
-        font-size: 16px;
-        margin-bottom: 12px;
-    }
-    
-    .sidebar-subheader {
-        background-color: #f2f2f7;
-        color: #1d1d1f;
-        padding: 8px 12px;
-        border-radius: 6px;
-        font-weight: 500;
-        font-size: 12px;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        margin-bottom: 12px;
-        border: 1px solid #e5e5ea;
+    /* Input Form Containers */
+    div[data-testid="stForm"] {
+        background-color: #1c2541;
+        border: 1px solid #3a506b;
+        border-radius: 12px;
+        padding: 24px;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
     }
     </style>
     """,
@@ -185,7 +196,7 @@ if selected_module == "Module 1: Basic Profile Details":
                 st.error(f"Database error: {str(e)}")
 
     # --- Client Directory Preview & Export ---
-    st.write("---")
+    st.divider()
     st.subheader("Client Directory")
 
     try:
