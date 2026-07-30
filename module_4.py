@@ -183,9 +183,9 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             for row_idx, row in enumerate(table):
                 header_candidate = [str(c).lower().strip() if c else "" for c in row]
                 
-                # Filter out summary headers
-                if any(bad in h for bad in ["nomination", "fixed deposits", "account type", "balance(i)"]) for h in header_candidate):
-                    if not any("withdrawal" in h or "particulars" in h for h in header_candidate):
+                # Filter out summary headers safely
+                if any(any(bad in h for bad in ["nomination", "fixed deposits", "account type", "balance(i)"]) for h in header_candidate):
+                    if not any(any(kw in h for kw in ["withdrawal", "particulars"]) for h in header_candidate):
                         continue
 
                 if any(any(k in h for k in ["particulars", "description", "narration", "transaction details", "remarks"]) for h in header_candidate):
