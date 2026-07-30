@@ -3,6 +3,7 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
 from module_2 import render_module_2
+from module_3 import render_module_3
 
 # --- Page Configuration ---
 st.set_page_config(page_title="Tax & Wealth OS", layout="wide")
@@ -102,7 +103,8 @@ selected_module = st.sidebar.radio(
     "Select Module",
     [
         "Module 1: Basic Profile Details",
-        "Module 2: Income Tax Statutory Questionnaire"
+        "Module 2: Income Tax Statutory Questionnaire",
+        "Module 3: Document Vault & Repository"
     ],
     label_visibility="collapsed"
 )
@@ -228,3 +230,7 @@ if selected_module == "Module 1: Basic Profile Details":
 # --- Module 2 Render ---
 elif selected_module == "Module 2: Income Tax Statutory Questionnaire":
     render_module_2()
+
+# --- Module 3 Render ---
+elif selected_module == "Module 3: Document Vault & Repository":
+    render_module_3()
