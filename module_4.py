@@ -128,8 +128,8 @@ def analyze_and_register_layout(doc_type: str, spatial_analysis: dict) -> dict:
         line_low = line.lower()
         if any(bad_kw in line_low for bad_kw in ["nomination", "fixed deposits", "account type", "balance(i)", "balance(i+ii)", "(linked)"]):
             continue
-        if any(h in line_low for h in header_keywords) and len(line_low.split()) >= 3:
-            detected_headers = [w.strip() for w in line.split() if len(w.strip()) > 2]
+        if any(h in line_low for h in header_keywords):
+            detected_headers = [w.strip() for w in line.split() if len(w.strip()) > 1]
             break
 
     generated_rules = {
@@ -166,7 +166,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
     DEBIT_KEYWORDS = ["AUTO DEBIT", "ATD", "BILLPAY", "DEBIT CARD", "SMSCHGS", "CHARGES", "FEE", "WITHDRAWAL"]
     CREDIT_KEYWORDS = ["INT.PD", "INTEREST CREDIT", "INTEREST PAID", "DEPOSIT", "REFUND"]
 
-    # Strict Table Extraction
+    # 1. Primary Structured Table Parsing Pass
     for page in pdf.pages:
         tables = page.extract_tables()
         if not tables:
@@ -182,6 +182,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             for row_idx, row in enumerate(table):
                 header_candidate = [str(c).lower().strip() if c else "" for c in row]
                 
+                # Exclude account details / summary headers
                 if any(any(bad in h for bad in ["nomination", "fixed deposits", "account type", "balance(i)", "balance(i+ii)", "(linked)"]) for h in header_candidate):
                     continue
 
@@ -260,51 +261,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             if current_entry:
                 ledger.append(current_entry)
 
-    # Line Extraction Fallback (Only executed if no structured tables were recognized)
-    if not ledger:
-        for layout in spatial_analysis["layouts"]:
-            for line in layout["lines"]:
-                line_str = line["text"]
-                line_upper = line_str.upper()
-
-                if any(kw in line_upper for kw in ["B/F", "BROUGHT FORWARD", "OPENING BALANCE", "NOMINATION", "FIXED DEPOSITS", "ACCOUNT TYPE"]):
-                    continue
-
-                date_match = re.search(r"\b(?:\d{2}[/-]\d{2}[/-]\d{4}|\d{2}-[A-Za-z]{3}-\d{4})\b", line_str)
-                if not date_match:
-                    continue
-
-                txn_date = date_match.group(0)
-                amounts = re.findall(r"[\d,]+\.\d{2}", line_str)
-                if not amounts:
-                    continue
-
-                num_amounts = [_clean_number(a) for a in amounts]
-                balance = num_amounts[-1] if len(num_amounts) >= 1 else 0.0
-                txn_amount = num_amounts[-2] if len(num_amounts) >= 2 else num_amounts[0]
-
-                is_explicit_debit = any(kw in line_upper for kw in DEBIT_KEYWORDS)
-                is_explicit_credit = any(kw in line_upper for kw in CREDIT_KEYWORDS) or bool(re.search(r"\bCR\b", line_upper))
-
-                if is_explicit_debit:
-                    debit = txn_amount
-                    credit = 0.0
-                elif is_explicit_credit:
-                    credit = txn_amount
-                    debit = 0.0
-                else:
-                    debit = txn_amount
-                    credit = 0.0
-
-                ledger.append({
-                    "date": txn_date,
-                    "description": line_str,
-                    "debit": debit,
-                    "credit": credit,
-                    "running_balance": balance,
-                })
-
-    # Exact Signature Deduplication
+    # 2. Strict Spatial Deduplication & Filtering Pass
     unique_ledger = []
     seen_transactions = set()
     for item in ledger:
@@ -315,7 +272,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             seen_transactions.add(dedup_key)
             unique_ledger.append(item)
 
-    # Tax Categorization Pass
+    # 3. Income Tax Act Classification Pass
     final_ledger = []
     for t in unique_ledger:
         if t["debit"] == 0.0 and t["credit"] == 0.0:
@@ -348,28 +305,16 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
 
     full_text = spatial_analysis["full_text"]
     
-    summary_block = re.search(
-        r"Opening\s+Balance\s+Total\s+Debit\s+Total\s+Credit\s+Closing\s+Balance\s*([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})",
-        full_text,
-        re.IGNORECASE
-    )
-
-    if summary_block:
-        opening_bal = _clean_number(summary_block.group(1))
-        extracted_debits = _clean_number(summary_block.group(2))
-        extracted_credits = _clean_number(summary_block.group(3))
-        closing_bal = _clean_number(summary_block.group(4))
-    else:
-        op_match = re.search(r"(?i)(?:opening balance|b/f)\D*([\d,]+\.\d{2})", full_text)
-        cl_match = re.search(r"(?i)(?:closing balance|c/f)\D*([\d,]+\.\d{2})", full_text)
-        opening_bal = _clean_number(op_match.group(1)) if op_match else (final_ledger[0]["running_balance"] - final_ledger[0]["credit"] + final_ledger[0]["debit"] if final_ledger else 0.0)
-        closing_bal = _clean_number(cl_match.group(1)) if cl_match else (final_ledger[-1]["running_balance"] if final_ledger else 0.0)
+    op_match = re.search(r"(?i)(?:opening balance|b/f)\D*([\d,]+\.\d{2})", full_text)
+    cl_match = re.search(r"(?i)(?:closing balance|c/f)\D*([\d,]+\.\d{2})", full_text)
+    opening_bal = _clean_number(op_match.group(1)) if op_match else (final_ledger[0]["running_balance"] - final_ledger[0]["credit"] + final_ledger[0]["debit"] if final_ledger else 0.0)
+    closing_bal = _clean_number(cl_match.group(1)) if cl_match else (final_ledger[-1]["running_balance"] if final_ledger else 0.0)
 
     total_credits = sum(item["credit"] for item in final_ledger)
     total_debits = sum(item["debit"] for item in final_ledger)
     calc_closing = round(opening_bal - total_debits + total_credits, 2)
 
-    reconciliation_passed = bool(abs(calc_closing - closing_bal) <= 1200.0) if closing_bal > 0 else True
+    reconciliation_passed = bool(abs(calc_closing - closing_bal) <= 1.0) if closing_bal > 0 else True
     detected_interest_items = [t for t in final_ledger if "Interest" in t["classified_category"]]
     total_interest_detected = sum(t["amount"] for t in detected_interest_items)
 
