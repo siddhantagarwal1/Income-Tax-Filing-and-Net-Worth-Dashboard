@@ -18,7 +18,7 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 
-# --- Spatial Layout & Text Analysis Engine ---
+# --- Helper Routines ---
 def _clean_number(val) -> float:
     """Utility to convert text representations of currency into strict floating-point values."""
     if val is None:
@@ -31,19 +31,13 @@ def _clean_number(val) -> float:
 
 
 def analyze_pdf_spatial_structure(pdf: pdfplumber.PDF) -> dict:
-    """
-    Pass 1: Perform document-level spatial layout and bounding box analysis.
-    Identifies column coordinates, line clusters, and structural metadata without assumptions.
-    """
+    """Performs spatial layout discovery and raw text line extraction."""
     page_layouts = []
     global_text_lines = []
 
     for page_num, page in enumerate(pdf.pages):
-        words = page.extract_words(
-            x_tolerance=3, y_tolerance=3, keep_blank_chars=False
-        )
+        words = page.extract_words(x_tolerance=3, y_tolerance=3, keep_blank_chars=False)
         
-        # Group words by Y-coordinate lines (vertical alignment)
         lines_dict = {}
         for w in words:
             top_key = round(w["top"], 1)
@@ -60,24 +54,20 @@ def analyze_pdf_spatial_structure(pdf: pdfplumber.PDF) -> dict:
         for line_top in sorted(lines_dict.keys()):
             line_words = sorted(lines_dict[line_top], key=lambda x: x["x0"])
             line_text = " ".join([w["text"] for w in line_words])
-            sorted_lines.append(
-                {
-                    "top": line_top,
-                    "text": line_text,
-                    "words": line_words,
-                    "page": page_num + 1,
-                }
-            )
+            sorted_lines.append({
+                "top": line_top,
+                "text": line_text,
+                "words": line_words,
+                "page": page_num + 1,
+            })
             global_text_lines.append(line_text)
 
-        page_layouts.append(
-            {
-                "page_num": page_num + 1,
-                "width": page.width,
-                "height": page.height,
-                "lines": sorted_lines,
-            }
-        )
+        page_layouts.append({
+            "page_num": page_num + 1,
+            "width": page.width,
+            "height": page.height,
+            "lines": sorted_lines,
+        })
 
     return {
         "page_count": len(pdf.pages),
@@ -86,55 +76,19 @@ def analyze_pdf_spatial_structure(pdf: pdfplumber.PDF) -> dict:
     }
 
 
-def extract_bank_opening_closing_spatial(analysis: dict) -> tuple:
-    """
-    Pass 2: Extract true Opening and Closing balances via contextual spatial anchors.
-    Scans bounding lines sequentially rather than matching top-level regex globally.
-    """
-    full_text = analysis["full_text"]
-    opening_bal = None
-    closing_bal = None
-
-    # Spatial keyword search line by line
-    for layout in analysis["layouts"]:
-        for line in layout["lines"]:
-            txt = line["text"].lower()
-
-            # Contextual Opening Balance Anchor
-            if any(k in txt for k in ["opening balance", "b/f balance", "balance b/f", "prev bal", "opening bal"]):
-                amounts = re.findall(r"[\d,]+\.\d{2}", line["text"])
-                if amounts:
-                    opening_bal = _clean_number(amounts[0])
-
-            # Contextual Closing Balance Anchor
-            if any(k in txt for k in ["closing balance", "c/f balance", "balance c/f", "closing bal", "final balance"]):
-                amounts = re.findall(r"[\d,]+\.\d{2}", line["text"])
-                if amounts:
-                    closing_bal = _clean_number(amounts[-1])
-
-    # Fallback to structural line detection if isolated anchors are not explicitly labeled
-    if opening_bal is None:
-        op_match = re.search(r"(?i)(?:opening balance|b/f)\D*([\d,]+\.\d{2})", full_text)
-        if op_match:
-            opening_bal = _clean_number(op_match.group(1))
-
-    if closing_bal is None:
-        cl_match = re.search(r"(?i)(?:closing balance|c/f)\D*([\d,]+\.\d{2})", full_text)
-        if cl_match:
-            closing_bal = _clean_number(cl_match.group(1))
-
-    return opening_bal, closing_bal
-
-
 def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict) -> dict:
-    """Spatial Line-Item Parser for heterogeneous Bank Statements."""
+    """
+    Robust Bank Statement Parser with:
+    1. Table-based extraction using expanded multi-bank header dictionaries (IDFC, ICICI, etc.).
+    2. Spatial Text-Line Fallback Engine for frameless or non-standard PDF structures.
+    """
     ledger = []
     
+    # 1. Primary Table Extraction Pass
     for layout in spatial_analysis["layouts"]:
         page = pdf.pages[layout["page_num"] - 1]
         tables = page.extract_tables()
         
-        # Table-assisted extraction with spatial validation
         if tables:
             for table in tables:
                 if not table or len(table) < 2:
@@ -143,13 +97,13 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict) ->
                 
                 date_idx, desc_idx, dr_idx, cr_idx, bal_idx, amt_idx = -1, -1, -1, -1, -1, -1
                 for i, h in enumerate(header):
-                    if "date" in h:
+                    if any(k in h for k in ["date", "txn date", "value date"]):
                         date_idx = i
-                    elif any(k in h for k in ["narration", "particular", "description", "details", "remark"]):
+                    elif any(k in h for k in ["narration", "particular", "description", "details", "remark", "transaction details"]):
                         desc_idx = i
-                    elif any(k in h for k in ["debit", "withdrawal", "dr"]):
+                    elif any(k in h for k in ["debit", "withdrawal", "dr", "amount (dr)"]):
                         dr_idx = i
-                    elif any(k in h for k in ["credit", "deposit", "cr"]):
+                    elif any(k in h for k in ["credit", "deposit", "cr", "amount (cr)"]):
                         cr_idx = i
                     elif "balance" in h:
                         bal_idx = i
@@ -181,7 +135,6 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict) ->
                     if debit == 0.0 and credit == 0.0:
                         continue
 
-                    # Tax Head Categorization Engine
                     category = "General Transfer"
                     desc_upper = desc.upper()
                     if any(term in desc_upper for term in ["INT.PD", "INT CREDIT", "SAVINGS INTEREST", "INTEREST PAID", "INT PROCESS"]):
@@ -195,24 +148,73 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict) ->
                     elif "REFUND" in desc_upper or "INCOME TAX" in desc_upper:
                         category = "Income Tax Refund (Sec 244A)"
 
-                    ledger.append(
-                        {
-                            "date": txn_date,
-                            "description": desc,
-                            "transaction_type": "Credit" if credit > 0 else "Debit",
-                            "amount": credit if credit > 0 else debit,
-                            "debit": debit,
-                            "credit": credit,
-                            "running_balance": balance,
-                            "classified_category": category,
-                        }
-                    )
+                    ledger.append({
+                        "date": txn_date,
+                        "description": desc,
+                        "transaction_type": "Credit" if credit > 0 else "Debit",
+                        "amount": credit if credit > 0 else debit,
+                        "debit": debit,
+                        "credit": credit,
+                        "running_balance": balance,
+                        "classified_category": category,
+                    })
 
-    # Extract dynamic opening/closing bounds
-    op_bal, cl_bal = extract_bank_opening_closing_spatial(spatial_analysis)
-    
-    opening_bal = op_bal if op_bal is not None else (ledger[0]["running_balance"] - ledger[0]["credit"] + ledger[0]["debit"] if ledger else 0.0)
-    closing_bal = cl_bal if cl_bal is not None else (ledger[-1]["running_balance"] if ledger else 0.0)
+    # 2. Spatial Text-Line Fallback Pass (Triggers if table extraction yields zero rows)
+    if not ledger:
+        for layout in spatial_analysis["layouts"]:
+            for line in layout["lines"]:
+                line_str = line["text"]
+                date_match = re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", line_str)
+                if not date_match:
+                    continue
+
+                txn_date = date_match.group(0)
+                amounts = re.findall(r"[\d,]+\.\d{2}", line_str)
+                
+                if not amounts:
+                    continue
+
+                num_amounts = [_clean_number(a) for a in amounts]
+                
+                # Rule-based position mapping for line-text amounts
+                balance = num_amounts[-1] if len(num_amounts) >= 1 else 0.0
+                txn_amount = num_amounts[-2] if len(num_amounts) >= 2 else num_amounts[0]
+
+                is_credit = any(k in line_str.upper() for k in ["CR", "CREDIT", "DEPOSIT", "INT", "REFUND"])
+                credit = txn_amount if is_credit else 0.0
+                debit = 0.0 if is_credit else txn_amount
+
+                category = "General Transfer"
+                desc_upper = line_str.upper()
+                if any(term in desc_upper for term in ["INT.PD", "INT CREDIT", "SAVINGS INTEREST", "INTEREST PAID", "INT PROCESS"]):
+                    category = "Savings Interest (Sec 80TTA/80TTB)"
+                elif "FD INT" in desc_upper or "TERM DEPOSIT INT" in desc_upper:
+                    category = "Fixed Deposit Interest"
+                elif "DIVIDEND" in desc_upper or "DIV" in desc_upper:
+                    category = "Dividend Income (Sec 56(2)(i))"
+                elif "SGB" in desc_upper and "INT" in desc_upper:
+                    category = "SGB Interest Income"
+                elif "REFUND" in desc_upper or "INCOME TAX" in desc_upper:
+                    category = "Income Tax Refund (Sec 244A)"
+
+                ledger.append({
+                    "date": txn_date,
+                    "description": line_str,
+                    "transaction_type": "Credit" if credit > 0 else "Debit",
+                    "amount": credit if credit > 0 else debit,
+                    "debit": debit,
+                    "credit": credit,
+                    "running_balance": balance,
+                    "classified_category": category,
+                })
+
+    # Balance Extraction & Logic Proof
+    full_text = spatial_analysis["full_text"]
+    op_match = re.search(r"(?i)(?:opening balance|b/f)\D*([\d,]+\.\d{2})", full_text)
+    cl_match = re.search(r"(?i)(?:closing balance|c/f)\D*([\d,]+\.\d{2})", full_text)
+
+    opening_bal = _clean_number(op_match.group(1)) if op_match else (ledger[0]["running_balance"] - ledger[0]["credit"] + ledger[0]["debit"] if ledger else 0.0)
+    closing_bal = _clean_number(cl_match.group(1)) if cl_match else (ledger[-1]["running_balance"] if ledger else 0.0)
 
     total_credits = sum(item["credit"] for item in ledger)
     total_debits = sum(item["debit"] for item in ledger)
@@ -239,9 +241,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict) ->
 
 
 def parse_ais_tis_spatial(spatial_analysis: dict) -> dict:
-    """Pass 2: Extract AIS/TIS structured line items spatially."""
     full_text = spatial_analysis["full_text"]
-    
     tds_matches = re.findall(r"(?i)(?:tds|tax deducted)\D*([\d,]+\.\d{2})", full_text)
     savings_int = re.findall(r"(?i)(?:interest from savings|194a)\D*([\d,]+\.\d{2})", full_text)
     dividends = re.findall(r"(?i)(?:dividend|194)\D*([\d,]+\.\d{2})", full_text)
@@ -254,7 +254,6 @@ def parse_ais_tis_spatial(spatial_analysis: dict) -> dict:
 
 
 def parse_excel_document(file_bytes: bytes, file_name: str) -> dict:
-    """Extracts and normalizes structured Demat / Capital Gains schedules from Excel sheets."""
     try:
         excel_file = pd.ExcelFile(io.BytesIO(file_bytes))
         sheet_summaries = {}
@@ -262,10 +261,6 @@ def parse_excel_document(file_bytes: bytes, file_name: str) -> dict:
         for sheet_name in excel_file.sheet_names:
             df = pd.read_excel(excel_file, sheet_name=sheet_name)
             df_clean = df.dropna(how="all").fillna("")
-            
-            # Map column heads lower
-            cols = [str(c).lower().strip() for c in df_clean.columns]
-            
             sheet_summaries[sheet_name] = {
                 "rows_count": len(df_clean),
                 "columns_detected": list(df_clean.columns),
@@ -282,7 +277,6 @@ def parse_excel_document(file_bytes: bytes, file_name: str) -> dict:
 
 
 def parse_sgb_certificate_spatial(spatial_analysis: dict) -> dict:
-    """Pass 2: Extract SGB Certificate metrics spatially."""
     full_text = spatial_analysis["full_text"]
     series = re.search(r"(?i)(?:series|tranche)\D*([A-Z0-9/-]+)", full_text)
     units = re.search(r"(?i)(?:units|quantity)\D*(\d+)", full_text)
@@ -297,21 +291,17 @@ def parse_sgb_certificate_spatial(spatial_analysis: dict) -> dict:
     }
 
 
-# --- Unified Parser Engine Router ---
 def parse_document_content(
     file_bytes: bytes, file_name: str, category: str, password: str = None
 ) -> dict:
     cat_upper = category.upper()
 
-    # Route Excel Files
     if file_name.endswith(".xlsx") or file_name.endswith(".xls"):
         return parse_excel_document(file_bytes, file_name)
 
-    # Route PDF Documents via Two-Pass Spatial Engine
     try:
         open_kwargs = {"password": password} if password else {}
         with pdfplumber.open(io.BytesIO(file_bytes), **open_kwargs) as pdf:
-            # Pass 1: Spatial Layout Discovery
             spatial_analysis = analyze_pdf_spatial_structure(pdf)
 
             extracted_data = {
@@ -320,7 +310,6 @@ def parse_document_content(
                 "pages_analyzed": spatial_analysis["page_count"],
             }
 
-            # Pass 2: Contextual Schema Normalization
             if "BANK" in cat_upper:
                 extracted_data["parsed_bank_details"] = parse_bank_statement_spatial(pdf, spatial_analysis)
             elif "AIS" in cat_upper or "TIS" in cat_upper:
@@ -446,8 +435,11 @@ def render_module_4():
         st.write("")
         parse_btn = st.button("Parse Document", type="primary", key="m4_parse_btn")
 
+    # Debug Inspector Toggle
+    show_debug = st.checkbox("Enable Layout Debug Inspector", value=True, key="m4_debug_chk")
+
     if parse_btn:
-        with st.spinner(f"Running Spatial Analysis & Ingesting {target_doc['file_name']}..."):
+        with st.spinner(f"Running Extraction & Debug Analysis on {target_doc['file_name']}..."):
             try:
                 try:
                     file_bytes = supabase.storage.from_("client_vault").download(target_doc["file_path"])
@@ -480,6 +472,31 @@ def render_module_4():
                 st.rerun()
             except Exception as parse_err:
                 st.error(f"Failed to fetch or parse file: {str(parse_err)}")
+
+    st.divider()
+
+    # --- Layout Debug Inspector Output ---
+    if show_debug:
+        st.markdown("<h4 style='color: #d97706;'>Layout Debug Inspector</h4>", unsafe_allow_html=True)
+        if st.button("Inspect Raw Text & Structural Layout", key="btn_run_inspect"):
+            try:
+                try:
+                    file_bytes = supabase.storage.from_("client_vault").download(target_doc["file_path"])
+                except Exception:
+                    file_bytes = supabase.storage.from_("vault_documents").download(target_doc["file_path"])
+                
+                open_kwargs = {"password": target_doc.get("file_password")} if target_doc.get("is_password_protected") else {}
+                with pdfplumber.open(io.BytesIO(file_bytes), **open_kwargs) as pdf:
+                    p1_text = pdf.pages[0].extract_text()
+                    p1_tables = pdf.pages[0].extract_tables()
+                    
+                    st.write("**Page 1 Extracted Tables Count:**", len(p1_tables))
+                    if p1_tables:
+                        st.write("**First Table Raw Headers/Rows:**", p1_tables[0][:3])
+                    st.write("**Page 1 Raw Text Lines Preview:**")
+                    st.code(p1_text[:2000] if p1_text else "NO TEXT EXTRACTED FROM PAGE 1")
+            except Exception as inspect_err:
+                st.error(f"Debug inspection failed: {str(inspect_err)}")
 
     st.divider()
 
