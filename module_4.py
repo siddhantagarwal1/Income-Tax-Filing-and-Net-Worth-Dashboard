@@ -1,8 +1,9 @@
+import io
 import json
+import re
+import pdfplumber
 import pandas as pd
 import streamlit as st
-from google import genai
-from google.genai import types
 from supabase import Client, create_client
 
 
@@ -17,60 +18,58 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 
-# --- Gemini Client Initialization ---
-@st.cache_resource
-def init_gemini_client() -> genai.Client:
-    api_key = st.secrets.get("GEMINI_API_KEY")
-    if not api_key:
-        st.error("Missing GEMINI_API_KEY in Streamlit Secrets.")
-        st.stop()
-    return genai.Client(api_key=api_key)
-
-
-gemini_client = init_gemini_client()
-
-
-# --- Real Document Parser via Gemini 2.5 Flash ---
+# --- Deterministic PDF Parser Engine ---
 def parse_document_content(file_bytes: bytes, file_name: str, category: str) -> dict:
-    """Uses Gemini 2.5 Flash to accurately extract structured tax and financial data."""
-    mime_type = "application/pdf"
-    if file_name.lower().endswith(".jpg") or file_name.lower().endswith(".jpeg"):
-        mime_type = "image/jpeg"
-    elif file_name.lower().endswith(".png"):
-        mime_type = "image/png"
-
-    prompt = f"""
-    You are an expert Indian Income Tax & Financial Audit Extraction Engine.
-    Analyze this uploaded document ({file_name}) belonging to category: "{category}".
-    Extract ALL actionable numeric line items, monetary values, dates, holder details, and statutory fields.
-    
-    Format requirements:
-    1. Output strictly valid JSON without any markdown code block wrappers (no ```json).
-    2. Ensure key names are standardized in snake_case.
-    3. Convert monetary amounts to clear float values (e.g., 250000.00).
-    4. For Sovereign Gold Bonds (SGB), extract: issuing_authority, investment_amount, units_held, interest_rate_pct, issue_date, folio_number.
-    5. For AIS/TIS / Previous Year ITR / Form 16 / Bank Statements, extract all schedule-level totals and line items precisely.
-    """
+    """Extracts text and key financial line-items using pdfplumber and regex."""
+    cat_upper = category.upper()
+    raw_text = ""
 
     try:
-        response = gemini_client.models.generate_content(
-            model="gemini-2.0-flash-lite",
-            contents=[
-                types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
-                prompt,
-            ],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-            ),
-        )
-        return json.loads(response.text)
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    raw_text += text + "\n"
     except Exception as e:
-        return {
-            "error": f"LLM Extraction failed: {str(e)}",
-            "file_name": file_name,
-            "category": category,
-        }
+        return {"error": f"Failed to extract PDF text: {str(e)}", "file_name": file_name}
+
+    extracted_data = {
+        "file_name": file_name,
+        "category": category,
+        "raw_text_length": len(raw_text),
+    }
+
+    # Deterministic pattern matching per category
+    if "BANK" in cat_upper:
+        interest_matches = re.findall(
+            r"(?i)(?:interest|int paid|int cr)\D*([\d,]+\.\d{2})", raw_text
+        )
+        amounts = [float(m.replace(",", "")) for m in interest_matches]
+        extracted_data["detected_interest_entries"] = amounts
+        extracted_data["total_interest_detected"] = (
+            sum(amounts) if amounts else 0.0
+        )
+
+    elif "SGB" in cat_upper or "SOVEREIGN GOLD BOND" in cat_upper:
+        units = re.search(r"(?i)(?:units|quantity)\D*(\d+)", raw_text)
+        amount = re.search(
+            r"(?i)(?:amount|consideration)\D*([\d,]+\.\d{2})", raw_text
+        )
+        extracted_data["units_held"] = int(units.group(1)) if units else None
+        extracted_data["investment_amount"] = (
+            float(amount.group(1).replace(",", "")) if amount else None
+        )
+
+    elif "FORM 16" in cat_upper or "16A" in cat_upper:
+        pan = re.search(r"[A-Z]{5}[0-9]{4}[A-Z]{1}", raw_text)
+        extracted_data["pan_detected"] = pan.group(0) if pan else None
+
+    else:
+        extracted_data["summary_preview"] = (
+            raw_text[:500] if raw_text else "No extractable text found."
+        )
+
+    return extracted_data
 
 
 def get_doc_enum_type(category: str) -> str:
@@ -101,7 +100,7 @@ def render_module_4():
         """
         <div class="module-header-container">
             <div class="module-title">Module 4: Financial & Tax Data Ingestion Engine</div>
-            <div class="module-subtitle">Automated AI Parsing, Extraction & Staging Repository</div>
+            <div class="module-subtitle">Automated Deterministic Parsing, Extraction & Staging Repository</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -180,13 +179,9 @@ def render_module_4():
         parse_btn = st.button("Parse Document", type="primary", key="m4_parse_btn")
 
     if parse_btn:
-        with st.spinner(f"Extracting real line items from {target_doc['file_name']} via Gemini..."):
+        with st.spinner(f"Extracting line items from {target_doc['file_name']} via pdfplumber..."):
             try:
-                # Fetch original file bytes directly from Supabase Storage bucket
-                try:
-                    file_bytes = supabase.storage.from_("client_vault").download(target_doc["file_path"])
-                except Exception:
-                    file_bytes = supabase.storage.from_("vault_documents").download(target_doc["file_path"])
+                file_bytes = supabase.storage.from_("vault_documents").download(target_doc["file_path"])
                 
                 parsed_json = parse_document_content(
                     file_bytes=file_bytes,
