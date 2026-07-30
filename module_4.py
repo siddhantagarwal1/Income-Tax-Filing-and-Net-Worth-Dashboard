@@ -123,7 +123,7 @@ def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
 
 
 def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, layout_meta: dict) -> dict:
-    """Multi-page table & text parsing engine with strict cell-index mapping, line-break normalization, and anchor balance matching."""
+    """Multi-page table & text parsing engine with strict numeric validation and whitespace normalization."""
     ledger = []
 
     # 1. Primary Structured Table Parsing Pass
@@ -179,14 +179,18 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     txn_date = date_match.group(0)
                     desc = str(row[desc_idx]).strip() if desc_idx != -1 and desc_idx < len(row) and row[desc_idx] else ""
 
-                    # Strict Cell Isolation (Reject text artifacts bleeding into debit/credit columns)
+                    # Strict Currency Numeric Check to prevent text-token bleed into Debit/Credit
                     raw_dr = str(row[dr_idx]).strip() if dr_idx != -1 and dr_idx < len(row) and row[dr_idx] else ""
                     raw_cr = str(row[cr_idx]).strip() if cr_idx != -1 and cr_idx < len(row) and row[cr_idx] else ""
                     raw_bal = str(row[bal_idx]).strip() if bal_idx != -1 and bal_idx < len(row) and row[bal_idx] else ""
 
-                    debit = _clean_number(raw_dr) if re.search(r"\d", raw_dr) else 0.0
-                    credit = _clean_number(raw_cr) if re.search(r"\d", raw_cr) else 0.0
-                    balance = _clean_number(raw_bal) if re.search(r"\d", raw_bal) else 0.0
+                    is_dr_valid = bool(re.match(r"^[\d,]+(\.\d{1,2})?$", raw_dr))
+                    is_cr_valid = bool(re.match(r"^[\d,]+(\.\d{1,2})?$", raw_cr))
+                    is_bal_valid = bool(re.match(r"^[\d,]+(\.\d{1,2})?$", raw_bal))
+
+                    debit = _clean_number(raw_dr) if is_dr_valid else 0.0
+                    credit = _clean_number(raw_cr) if is_cr_valid else 0.0
+                    balance = _clean_number(raw_bal) if is_bal_valid else 0.0
 
                     current_entry = {
                         "date": txn_date,
@@ -232,13 +236,12 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     "running_balance": balance,
                 })
 
-    # Tax Classification Engine with Normalized String Matching
+    # Tax Classification Engine with Normalized Whitespace
     final_ledger = []
     for t in ledger:
         if t["debit"] == 0.0 and t["credit"] == 0.0:
             continue
 
-        # Replacing newlines with single spaces for unified regex evaluation
         normalized_desc = " ".join(t["description"].split()).upper()
         
         category = "General Transfer"
@@ -575,7 +578,7 @@ def render_module_4():
                         })
                     st.dataframe(pd.DataFrame(page_summary))
             except Exception as inspect_err:
-                st.error(f"Multi-page inspection failed: {str(inspect_err)}")
+                st.error(f"Debug inspection failed: {str(inspect_err)}")
 
     st.divider()
 
