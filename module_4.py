@@ -121,10 +121,14 @@ def analyze_and_register_layout(doc_type: str, spatial_analysis: dict) -> dict:
         first_meaningful_line = text_lines[0][:30] if text_lines else "GENERIC_DOC"
         signature_kw = [first_meaningful_line]
 
-    header_keywords = ["date", "particulars", "debit", "credit", "balance"]
+    # Enhanced layout header selection (excludes summary boxes)
+    header_keywords = ["date", "particulars", "description", "withdrawal", "deposit", "debit", "credit", "balance"]
     detected_headers = []
+    
     for line in full_text.split("\n"):
         line_low = line.lower()
+        if ("nomination" in line_low or "fixed deposits" in line_low) and "withdrawal" not in line_low:
+            continue
         if any(h in line_low for h in header_keywords) and len(line_low.split()) >= 3:
             detected_headers = [w.strip() for w in line.split() if len(w.strip()) > 2]
             break
@@ -178,6 +182,10 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
             for row_idx, row in enumerate(table):
                 header_candidate = [str(c).lower().strip() if c else "" for c in row]
                 
+                # Exclude account summary headers
+                if any("nomination" in h or "fixed deposits" in h for h in header_candidate):
+                    continue
+
                 if any(any(k in h for k in ["particulars", "description", "narration", "transaction details", "remarks"]) for h in header_candidate):
                     header_found = True
                     for i, h in enumerate(header_candidate):
@@ -259,7 +267,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                 line_str = line["text"]
                 line_upper = line_str.upper()
 
-                if any(kw in line_upper for kw in ["B/F", "BROUGHT FORWARD", "OPENING BALANCE"]):
+                if any(kw in line_upper for kw in ["B/F", "BROUGHT FORWARD", "OPENING BALANCE", "NOMINATION", "FIXED DEPOSITS"]):
                     continue
 
                 date_match = re.search(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}-[A-Za-z]{3}-\d{2,4})\b", line_str)
