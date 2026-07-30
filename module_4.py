@@ -123,8 +123,11 @@ def match_or_register_layout(doc_type: str, raw_text: str) -> dict:
 
 
 def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, layout_meta: dict) -> dict:
-    """Multi-page table & text parsing engine with strict numeric validation and whitespace normalization."""
+    """Multi-page table & text parsing engine with strict mandatory currency decimal validation."""
     ledger = []
+
+    # Strict regex pattern requiring two decimal digits (.XX) for bank amounts
+    STRICT_CURRENCY_REGEX = r"^\d{1,3}(,\d{2,3})*\.\d{2}$|^\d+\.\d{2}$"
 
     # 1. Primary Structured Table Parsing Pass
     for page in pdf.pages:
@@ -179,14 +182,14 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     txn_date = date_match.group(0)
                     desc = str(row[desc_idx]).strip() if desc_idx != -1 and desc_idx < len(row) and row[desc_idx] else ""
 
-                    # Strict Currency Numeric Check to prevent text-token bleed into Debit/Credit
                     raw_dr = str(row[dr_idx]).strip() if dr_idx != -1 and dr_idx < len(row) and row[dr_idx] else ""
                     raw_cr = str(row[cr_idx]).strip() if cr_idx != -1 and cr_idx < len(row) and row[cr_idx] else ""
                     raw_bal = str(row[bal_idx]).strip() if bal_idx != -1 and bal_idx < len(row) and row[bal_idx] else ""
 
-                    is_dr_valid = bool(re.match(r"^[\d,]+(\.\d{1,2})?$", raw_dr))
-                    is_cr_valid = bool(re.match(r"^[\d,]+(\.\d{1,2})?$", raw_cr))
-                    is_bal_valid = bool(re.match(r"^[\d,]+(\.\d{1,2})?$", raw_bal))
+                    # Reject non-currency strings (e.g. tracking IDs like '1838953') missing mandatory .XX decimals
+                    is_dr_valid = bool(re.match(STRICT_CURRENCY_REGEX, raw_dr))
+                    is_cr_valid = bool(re.match(STRICT_CURRENCY_REGEX, raw_cr))
+                    is_bal_valid = bool(re.match(STRICT_CURRENCY_REGEX, raw_bal))
 
                     debit = _clean_number(raw_dr) if is_dr_valid else 0.0
                     credit = _clean_number(raw_cr) if is_cr_valid else 0.0
