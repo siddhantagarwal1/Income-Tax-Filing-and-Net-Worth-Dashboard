@@ -168,7 +168,7 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
     ledger = []
     STRICT_CURRENCY_REGEX = r"^\d{1,3}(,\d{2,3})*\.\d{2}$|^\d+\.\d{2}$"
     DEBIT_KEYWORDS = ["AUTO DEBIT", "ATD", "BILLPAY", "DEBIT CARD", "SMSCHGS", "CHARGES", "FEE", "WITHDRAWAL", "CREDIT CARD ATD"]
-    CREDIT_KEYWORDS = ["INT.PD", "INTEREST CREDIT", "INTEREST PAID", "DEPOSIT", "REFUND"]
+    CREDIT_KEYWORDS = ["INT.PD", "INTEREST CREDIT", "INTEREST PAID", "DEPOSIT", "REFUND", "SALARY", "NEFT", "IMPS", "UPI"]
 
     pages_with_tables = set()
 
@@ -197,9 +197,9 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                             if date_idx == -1: date_idx = i
                         elif any(k in h for k in ["particulars", "description", "narration", "mode"]):
                             if desc_idx == -1 or "particulars" in h: desc_idx = i
-                        elif any(k in h for k in ["withdrawal", "debit", "dr"]):
+                        elif any(k in h for k in ["withdrawal", "debit", "dr", "withdrawals"]):
                             dr_idx = i
-                        elif any(k in h for k in ["deposit", "credit", "cr"]):
+                        elif any(k in h for k in ["deposit", "credit", "cr", "deposits"]):
                             cr_idx = i
                         elif "balance" in h:
                             bal_idx = i
@@ -233,10 +233,13 @@ def parse_bank_statement_spatial(pdf: pdfplumber.PDF, spatial_analysis: dict, la
                     credit = _clean_number(raw_cr) if re.match(STRICT_CURRENCY_REGEX, raw_cr) else 0.0
                     balance = _clean_number(raw_bal) if re.match(STRICT_CURRENCY_REGEX, raw_bal) else 0.0
 
-                    desc_upper = desc.upper()
-                    if any(kw in desc_upper for kw in DEBIT_KEYWORDS) and credit > 0 and debit == 0:
-                        debit = credit
-                        credit = 0.0
+                    # Correct strict column assignment check for ICICI statements
+                    if cr_idx != -1 and dr_idx != -1 and cr_idx == dr_idx:
+                        # If columns overlap, use explicit classification
+                        desc_upper = desc.upper()
+                        if any(kw in desc_upper for kw in DEBIT_KEYWORDS):
+                            debit = credit if credit > 0 else debit
+                            credit = 0.0
 
                     current_entry = {
                         "date": txn_date, "description": desc, "debit": debit,
